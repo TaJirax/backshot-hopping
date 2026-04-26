@@ -65,8 +65,8 @@ PROFILE_PRESETS = {
         "masquerade": False,
         "rand_src_port": False,
         "jitter_bytes": 0,
-        "preemptive_hop_ms": 10000,
-        "fixed_hop_ms": 10000,
+        "preemptive_hop_ms": 1000,
+        "fixed_hop_ms": 0,
         "keepalive_interval_sec": 20,
     },
     "stealth": {
@@ -889,6 +889,7 @@ class HopShotClient:
                     log.exception(f"[tunnel] rx loop: {e}")
 
     def _tunnel_tx_loop(self):
+        """Read IP packets from TUN device and feed them through the full send pipeline."""
         if self._tunnel is None:
             return
         while self._running:
@@ -896,7 +897,9 @@ class HopShotClient:
                 pkt = self._tunnel.read(65535)
                 if not pkt:
                     continue
-                self._send_tunnel_payload(pkt)
+                # Feed tunnel packets through the FULL send pipeline:
+                # reactive probe -> FEC -> burst -> hop -> obfs -> send
+                self.send(pkt)
             except Exception as e:
                 if self._running and self.verbose:
                     log.exception(f"[tunnel] tx loop: {e}")

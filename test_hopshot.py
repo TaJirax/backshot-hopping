@@ -80,7 +80,7 @@ def mini_server(port, obfs=False, seed=b"test-seed", jitter=64,
                     shard_data = common.strip_jitter_padding(payload[4:], jitter)
                     seq, idx, total = hdr["seq"], hdr["shard_idx"], hdr["total_shards"]
                     if seq not in groups:
-                        groups[seq] = {"s": [None]*total, "ol": orig_len, "done": False}
+                        groups[seq] = {"s": [None]*total, "ol": orig_len, "done": False, "ts": time.time()}
                     g = groups[seq]
                     if not g["done"] and g["s"][idx] is None:
                         g["s"][idx] = shard_data
@@ -89,7 +89,27 @@ def mini_server(port, obfs=False, seed=b"test-seed", jitter=64,
                                 rec = fecmod.reconstruct_data(g["s"], fec_k, fec_m, g["ol"])
                                 g["done"] = True
                                 received.append(rec)
+                                # Send Brutal CC feedback: 1000kbps, 0.5ms RTT, 0% loss
+                                bw_payload = common.pack_bw_feedback(1000, 0.5, 0.0)
+                                fb_hdr = common.pack_header(common.TYPE_BW_FEEDBACK, seq=0, session_id=hdr["session_id"])
+                                fb_pkt = fb_hdr + bw_payload
+                                if obfs:
+                                    fb_pkt = common.salamander(fb_pkt, seed)
+                                try:
+                                    sock.sendto(fb_pkt, addr)
+                                except:
+                                    pass
                             except: pass
+                elif hdr["type"] == common.TYPE_MTU_PROBE:
+                    # Echo back MTU_REPLY with received packet size
+                    reply_hdr = common.pack_header(common.TYPE_MTU_REPLY, seq=hdr["seq"], session_id=hdr.get("session_id", 0))
+                    reply = reply_hdr + struct.pack("!H", len(data))
+                    if obfs:
+                        reply = common.salamander(reply, seed)
+                    try:
+                        sock.sendto(reply, addr)
+                    except:
+                        pass
             except socket.timeout: pass
         sock.close()
     run.alive = True
@@ -226,8 +246,8 @@ def t_profile_overrides():
     assert cfg["masquerade"] is False
     assert cfg["rand_src_port"] is False
     assert cfg["jitter_bytes"] == 0
-    assert cfg["preemptive_hop_ms"] == 10000
-    assert cfg["fixed_hop_ms"] == 10000
+    assert cfg["preemptive_hop_ms"] == 1000
+    assert cfg["fixed_hop_ms"] == 0
     assert cfg["keepalive_interval_sec"] == 20
     assert set(PROFILE_PRESETS) == {"balanced", "reliable", "stealth", "throughput"}
 test("profile presets map to safe operator modes", t_profile_overrides)

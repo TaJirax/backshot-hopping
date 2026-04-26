@@ -386,6 +386,7 @@ class HopShotServer:
                     log.exception(f"[tunnel] send failed sess={sess.session_id} addr={sess.addr}")
 
     def _tunnel_tx_loop(self):
+        """Read IP packets from server TUN device and send them to connected clients."""
         if self._tunnel is None:
             return
 
@@ -394,14 +395,15 @@ class HopShotServer:
                 pkt = self._tunnel.read(65535)
                 if not pkt:
                     continue
+                # Forward TUN packets to all active tunnel sessions via the send pipeline
                 with self.sess_lock:
                     sessions = list(self.sessions.values())
                     if self._tunnel_session_id is not None and self._tunnel_session_id in self.sessions:
                         sessions = [self.sessions[self._tunnel_session_id]]
-                target = next((sess for sess in sessions if sess.addr is not None), None)
-                if target is None:
-                    continue
-                self._send_tunnel_payload(pkt, target)
+                # Send to each session's client using the full FEC pipeline
+                for sess in sessions:
+                    if sess.addr is not None:
+                        self._send_tunnel_payload(pkt, sess)
             except Exception as e:
                 if self._running and self.verbose:
                     log.exception(f"[tunnel] tx loop: {e}")
@@ -498,16 +500,26 @@ class HopShotServer:
                         log.exception(f"[DATA] FEC reconstruct seq={seq}: {e}")
 
     def _on_payload(self, sid, data: bytes, addr, transport, sess: Session, tx_sock: socket.socket | None = None):
-        """Application delivery point — prints received payload."""
+        """Application delivery point — reconstruct complete IP packets from FEC shards.
+        
+        If TUN mode is active, write reconstructed IP packets back to the server's TUN device
+        so they can be processed by local applications. Otherwise, print for testing.
+        """
         tx_sock = tx_sock or self.udp_sock
+        
+        # Write reconstructed payload to TUN device (IP packet forwarding)
         if self._tunnel is not None:
             try:
                 self._tunnel.write(data)
+                if self.verbose:
+                    log.debug(f"[tunnel] delivered {len(data)}B from session={sid} to TUN device")
             except Exception as e:
                 if self.verbose:
                     log.exception(f"[tunnel] write failed sid={sid}: {e}")
         else:
+            # Non-TUN mode: print reconstructed payload for testing
             print(f"\n[DELIVERED] {len(data)} bytes: {data!r}\n")
+        
         if self.verbose:
             log.debug(f"[PAYLOAD] sess={sid} transport={transport} bytes={len(data)}")
 

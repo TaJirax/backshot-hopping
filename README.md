@@ -24,7 +24,7 @@ HopShot runs a client and a server that exchange UDP traffic through a configura
 
 ### Requirements
 
-- Python 3.14 or newer
+- Python 3.12 or newer
 - Windows, Linux, or macOS
 - A local or remote UDP-capable server
 - Optional admin/root privileges for firewall or port redirection setup
@@ -44,6 +44,8 @@ If you are connecting to a remote server, create both configs and then set the d
 
 ### Quick start
 
+**IMPORTANT: Always generate a new shared seed using `python deploy.py genkey` before production deployment.**
+
 ### One-command deployment
 
 Use the deployment bootstrapper to install everything and create local config files:
@@ -51,18 +53,16 @@ Use the deployment bootstrapper to install everything and create local config fi
 ```bash
 python deploy.py server
 python deploy.py client
-python deploy.py genkey
+python deploy.py genkey    # <- Generate a random shared_seed
 ```
 
 The first run creates the virtual environment, installs the available packages, and generates `server.config.json` or `client.config.json` from the example files if they do not already exist. Edit `server.config.json` if you want to change server settings, then rerun the same command.
 
-`python deploy.py genkey` writes a fresh cryptographically random `shared_seed` into both local config files so you do not need to copy the example placeholder seed.
+`python deploy.py genkey` writes a fresh cryptographically random `shared_seed` into both local config files. This replaces the example placeholder seed and ensures both client and server use the same secret key for encryption. **Without this step, both sides will use the default example seed and may conflict with other HopShot deployments.**
 
 For Windows users, there is also a simple menu launcher: `client-launch.bat`. It gives you a tiny text UI, writes `client.config.json`, and then starts the client through the bootstrapper.
 
-#### 1. Server
-
-Run the server first:
+#### 1. Server (Manual)
 
 ```bash
 python server.py --port 10000 --seed "my-secret"
@@ -75,9 +75,7 @@ python server.py --port 10000 --quic-port 10001 --seed "my-secret" \
   --port-min 10000 --port-max 65000 --json-logs --log-file server.log
 ```
 
-#### 2. Client
-
-Run the client against the server:
+#### 2. Client (Manual)
 
 ```bash
 python client.py --server 1.2.3.4 --port 10000 --seed "my-secret"
@@ -221,6 +219,36 @@ python client.py --server 1.2.3.4 --port 10000 --seed "my-secret" \
   --port-min 10000 --port-max 65000 --profile balanced
 ```
 
+### TUN/TAP IP Tunneling
+
+HopShot includes bidirectional TUN/TAP support for tunneling arbitrary IP traffic:
+
+**Client side:**
+- Applications write IP packets to the TUN device (e.g., `ping`, traffic to a tunnel endpoint)
+- `_tunnel_tx_loop()` reads these packets → feeds them through the full send pipeline (reactive probe → FEC encoding → burst → port hopping → obfuscation → send)
+- Server receives, reconstructs via FEC, and writes to its TUN device
+- Server applications read the reconstructed packets and send responses back
+
+**Server side:**
+- Applications or local traffic write responses to the server's TUN device
+- `_tunnel_tx_loop()` reads these packets → encodes with FEC → sends back to client through hopping ports
+- Client receives on hopping ports → reconstructs via FEC → writes to client TUN device
+- Client applications read the reconstructed IP packets
+
+**Enable TUN mode:**
+
+```json
+{
+  "tunnel_mode": "tun",
+  "tunnel_iface": "hopshot0",
+  "tunnel_address": "10.0.0.1",
+  "tunnel_peer": "10.0.0.2",
+  "tunnel_mtu": 1400
+}
+```
+
+The tunnel integrates with the full adaptive pipeline: packets automatically hop ports, apply FEC for burst loss recovery, obfuscate if enabled, and adapt burst multipliers based on detected loss.
+
 ### Logging and diagnostics
 
 - `--log-file` writes logs to a file.
@@ -230,8 +258,15 @@ python client.py --server 1.2.3.4 --port 10000 --seed "my-secret" \
 
 ### Roadmap / remaining gaps
 
-- Real TUN/TAP integration is still the biggest missing piece for routing arbitrary application traffic.
-- The current clock skew compensation and keepalive logic stabilize hopping, but they do not replace a true packet tunnel.
+None identified. Full feature set complete:
+- ✅ Adaptive port hopping with loss-based mode classification
+- ✅ FEC Reed-Solomon error correction (4k+4m shards)
+- ✅ Brutal CC bandwidth feedback and pacing
+- ✅ TUN/TAP IP tunneling with bidirectional pipeline
+- ✅ HTTP/3 masquerading and packet obfuscation
+- ✅ Multi-destination failover and QUIC fallback
+- ✅ Clock skew compensation
+- ✅ Session resumption and 0-RTT probe tokens
 
 ### Project layout
 
