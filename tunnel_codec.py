@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import struct
+import time
 from dataclasses import dataclass
 from typing import Dict, Optional
 
@@ -82,7 +83,7 @@ class DataReassembler:
         with self._lock:
             grp = self._groups.get(seq)
             if grp is None:
-                grp = {"shards": [None] * total, "orig_len": orig_len, "received": 0, "delivered": False, "ts": common.time.time()}
+                grp = {"shards": [None] * total, "orig_len": orig_len, "received": 0, "delivered": False, "ts": time.time()}
                 self._groups[seq] = grp
 
             if grp["delivered"] or grp["shards"][shard_idx] is not None:
