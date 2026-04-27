@@ -104,27 +104,44 @@ def classify_loss(loss_pct: float) -> int:
 
 # ─── Packet header (16 bytes) ─────────────────────────────────────────────────
 # magic:2  type:1  transport:1  seq:4
-# shard_idx:1  total_shards:1  session_id:2  flags:1  reserved:3
+# shard_idx:1  total_shards:1  session_id:2  flags:1
+# frag_id:1  frag_count:1  stream_id:1
 
-HDR_FMT = "!HBBIBBHBxxx"
+HDR_FMT = "!HBBIBBHB3B"
 assert struct.calcsize(HDR_FMT) == HEADER_SIZE
 
 def pack_header(pkt_type, seq, shard_idx=0, total_shards=1,
-                session_id=0, transport=TRANSPORT_RAW, flags=0):
+                session_id=0, transport=TRANSPORT_RAW, flags=0,
+                frag_id=0, frag_count=1, stream_id=0):
+    frag_id = int(frag_id) & 0xFF
+    frag_count = int(frag_count) & 0xFF
+    stream_id = int(stream_id) & 0xFF
+    if frag_count <= 0:
+        frag_count = 1
+    if frag_id >= frag_count:
+        frag_id = 0
     return struct.pack(HDR_FMT, MAGIC, pkt_type, transport, seq,
-                       shard_idx, total_shards, session_id, flags)
+                       shard_idx, total_shards, session_id, flags,
+                       frag_id, frag_count, stream_id)
 
 def unpack_header(data: bytes):
     if len(data) < HEADER_SIZE:
         return None, None
-    magic, pkt_type, transport, seq, shard_idx, total_shards, session_id, flags = \
+    magic, pkt_type, transport, seq, shard_idx, total_shards, session_id, flags, frag_id, frag_count, stream_id = \
         struct.unpack_from(HDR_FMT, data)
     if magic != MAGIC:
         return None, None
+    # Backward compatibility: old packets had zeroed reserved bytes.
+    if frag_count == 0:
+        frag_count = 1
+        frag_id = 0
+    elif frag_id >= frag_count:
+        frag_id = 0
     return {
         "type": pkt_type, "transport": transport, "seq": seq,
         "shard_idx": shard_idx, "total_shards": total_shards,
         "session_id": session_id, "flags": flags,
+        "frag_id": frag_id, "frag_count": frag_count, "stream_id": stream_id,
     }, data[HEADER_SIZE:]
 
 # ─── BW feedback payload ──────────────────────────────────────────────────────

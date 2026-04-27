@@ -80,6 +80,39 @@ def _recv_exactly(sock, n: int) -> bytes:
     return buf
 
 
+class _FragmentingSocket:
+    def __init__(self, raw: socket.socket):
+        self._raw = raw
+        self._first_write = True
+
+    def send(self, data, *args, **kwargs):
+        if self._first_write and data:
+            self._first_write = False
+            midpoint = max(1, len(data) // 2)
+            first = data[:midpoint]
+            second = data[midpoint:]
+            sent = self._raw.send(first, *args, **kwargs)
+            if second:
+                self._raw.sendall(second)
+            return len(data) if sent else sent
+        return self._raw.send(data, *args, **kwargs)
+
+    def sendall(self, data, *args, **kwargs):
+        if self._first_write and data:
+            self._first_write = False
+            midpoint = max(1, len(data) // 2)
+            first = data[:midpoint]
+            second = data[midpoint:]
+            self._raw.sendall(first, *args, **kwargs)
+            if second:
+                self._raw.sendall(second)
+            return None
+        return self._raw.sendall(data, *args, **kwargs)
+
+    def __getattr__(self, name):
+        return getattr(self._raw, name)
+
+
 # ─── QUIC-like Client ─────────────────────────────────────────────────────────
 
 class QUICClient:
@@ -111,7 +144,9 @@ class QUICClient:
 
         try:
             raw = socket.create_connection((self.host, self.port), timeout=self.connect_timeout)
-            self._ssl = ctx.wrap_socket(raw, server_hostname=self.host)
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            wrapped_raw = _FragmentingSocket(raw)
+            self._ssl = ctx.wrap_socket(wrapped_raw, server_hostname=self.host)
             self._running = True
             threading.Thread(target=self._read_loop, daemon=True).start()
             log.info(f"[QUIC] connected to {self.host}:{self.port} "

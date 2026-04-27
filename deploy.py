@@ -73,6 +73,7 @@ CLIENT_DEFAULT_CONFIG = {
     "tunnel_udp_bind": "127.0.0.1:19090",
     "tunnel_udp_target": None,
     "declared_up_kbps": 0,
+    "declared_down_kbps": 0,
     "masquerade": False,
     "mtu": 0,
     "fec_k": 4,

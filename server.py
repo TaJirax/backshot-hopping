@@ -36,7 +36,7 @@ import brutal
 from quic_transport import QUICServer, generate_selfsigned_cert
 from http3_masq import HTTP3Masq
 from session_resume import SessionTokenManager, TOKEN_SIZE
-from tunnel_codec import encode_datagrams
+from tunnel_codec import encode_datagrams, stream_id_from_ip_packet
 from tun_transport import TunTapConfig, TunTapDevice, TunTapError
 from terminal_ui import configure_logging, key_value, section_header, supports_color, title
 from version import __version__
@@ -335,7 +335,7 @@ class HopShotServer:
                 f"shard={hdr['shard_idx']}/{hdr['total_shards']} transport={hdr['transport']}"
             )
         if t == common.TYPE_PROBE:
-            self._handle_probe(hdr, addr, common.TRANSPORT_RAW, tx_sock=recv_sock)
+            self._handle_probe(hdr, payload, addr, common.TRANSPORT_RAW, tx_sock=recv_sock)
         elif t == common.TYPE_RESUME:
             self._handle_resume(hdr, payload, addr, common.TRANSPORT_RAW, tx_sock=recv_sock)
         elif t == common.TYPE_DATA:
@@ -370,8 +370,17 @@ class HopShotServer:
 
     # ── Probe handler ─────────────────────────────────────────────────────────
 
-    def _handle_probe(self, hdr: dict, addr, transport: int, tx_sock: socket.socket | None = None):
+    def _handle_probe(self, hdr: dict, payload: bytes, addr, transport: int, tx_sock: socket.socket | None = None):
         tx_sock = tx_sock or self.udp_sock
+        sess = self._get_session(hdr["session_id"], addr)
+        sess.last_seen = time.monotonic()
+
+        client_rx_kbps = 0
+        if len(payload) >= 8:
+            client_rx_kbps = struct.unpack_from("!I", payload, 0)[0]
+            if client_rx_kbps > 0:
+                sess.receiver.set_declared_down_kbps(client_rx_kbps)
+
         reply = common.pack_header(
             pkt_type   = common.TYPE_PROBE_REPLY,
             seq        = hdr["seq"],
@@ -381,11 +390,15 @@ class HopShotServer:
         # Issue a 0-RTT session token alongside first probe reply
         token = self._token_mgr.issue(hdr["session_id"])
         server_ts = struct.pack("!Q", int(time.time() * 1000))
-        reply = reply + token + server_ts   # append token and server clock sample
+        server_rx_hint = int(self.declared_down_kbps or 0)
+        server_tx_hint = int(self.declared_down_kbps or 0)
+        bw_hint = struct.pack("!II", server_rx_hint, server_tx_hint)
+        reply = reply + token + server_ts + bw_hint
         if self.verbose:
             log.debug(
                 f"[probe] reply seq={hdr['seq']} sess={hdr['session_id']} "
-                f"addr={addr} token={len(token)}B transport={transport} ts={int(time.time() * 1000)}"
+                f"addr={addr} token={len(token)}B transport={transport} ts={int(time.time() * 1000)} "
+                f"client_rx_hint={client_rx_kbps} server_tx_hint={server_tx_hint}"
             )
 
         if self.obfs:
@@ -458,6 +471,8 @@ class HopShotServer:
             obfs=self.obfs,
             masquerade=self.masquerade,
             transport=common.TRANSPORT_RAW,
+            max_datagram_size=max(64, int(self.tunnel_mtu or common.MAX_PACKET)),
+            stream_id=stream_id_from_ip_packet(payload),
         )
 
         for pkt in encoded.datagrams:

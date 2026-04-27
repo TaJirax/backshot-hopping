@@ -106,6 +106,72 @@ class BrutalSender:
         with self._lock:
             return self._rate, self._rtt_ms
 
+    def set_ceil_kbps(self, ceil_kbps: float):
+        with self._lock:
+            if ceil_kbps <= 0:
+                return
+            self._ceil = float(min(MAX_RATE_KBPS, max(MIN_RATE_KBPS, ceil_kbps)))
+            self._rate = min(self._rate, self._ceil)
+
+
+class BBRSender:
+    """Lightweight BBR-style fallback sender with the same pacing interface."""
+
+    def __init__(self, initial_kbps: float = INITIAL_RATE_KBPS):
+        self._lock = threading.Lock()
+        self._rate = min(float(initial_kbps or INITIAL_RATE_KBPS), MAX_RATE_KBPS)
+        self._ceil = MAX_RATE_KBPS
+        self._rtt_ms = 0.0
+        self._bytes_sent = 0
+        self._bw_estimate = self._rate
+
+    def pace(self, sz: int):
+        with self._lock:
+            rate = self._rate
+        if rate <= 0:
+            return
+        delay = (sz * 8) / (rate * 1000.0)
+        delay = min(delay, 0.1)
+        if delay > 0.001:
+            time.sleep(delay)
+
+    def on_feedback(self, recv_rate_kbps: int, rtt_ms: int, loss_pct: int):
+        with self._lock:
+            self._rtt_ms = float(rtt_ms)
+            recv = float(max(0, recv_rate_kbps))
+            if recv > 0:
+                self._bw_estimate = 0.7 * self._bw_estimate + 0.3 * recv
+            if loss_pct > BAD_LOSS_THRESH:
+                self._rate = max(MIN_RATE_KBPS, min(self._rate * 0.9, self._bw_estimate * 0.9))
+            else:
+                target = max(self._bw_estimate * 1.15, self._rate * 1.05)
+                self._rate = min(self._ceil, max(MIN_RATE_KBPS, target))
+
+    def record_sent(self, sz: int):
+        with self._lock:
+            self._bytes_sent += sz
+
+    @property
+    def rate_kbps(self) -> float:
+        with self._lock:
+            return self._rate
+
+    @property
+    def rtt_ms(self) -> float:
+        with self._lock:
+            return self._rtt_ms
+
+    def stats(self):
+        with self._lock:
+            return self._rate, self._rtt_ms
+
+    def set_ceil_kbps(self, ceil_kbps: float):
+        with self._lock:
+            if ceil_kbps <= 0:
+                return
+            self._ceil = float(min(MAX_RATE_KBPS, max(MIN_RATE_KBPS, ceil_kbps)))
+            self._rate = min(self._rate, self._ceil)
+
 
 # ─── Receiver ─────────────────────────────────────────────────────────────────
 
@@ -173,3 +239,8 @@ class BrutalReceiver:
             self._max_seq   = None
 
             return recv_kbps, rtt_ms, loss_pct
+
+    def set_declared_down_kbps(self, declared_down_kbps: float):
+        with self._lock:
+            self._declared = float(declared_down_kbps)
+            self._ceil = float(declared_down_kbps) if declared_down_kbps > 0 else 0.0

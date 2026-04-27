@@ -44,7 +44,7 @@ from resolver import Resolver, DEFAULT_RESOLVERS
 from http3_masq import HTTP3Masq
 from mtu_probe import MTUProber
 from session_resume import ResumeTokenStore, TOKEN_SIZE
-from tunnel_codec import DataReassembler, encode_datagrams
+from tunnel_codec import DataReassembler, encode_datagrams, stream_id_from_ip_packet
 from tun_transport import TunTapConfig, TunTapDevice, TunTapError
 from terminal_ui import configure_logging, colorize, key_value, section_header, supports_color, title
 from version import __version__
@@ -59,23 +59,45 @@ log = logging.getLogger("hopshot.client")
 
 PROFILE_PRESETS = {
     "balanced": {},
-    "reliable": {
-        "disable_hop": False,
-        "obfs": False,
-        "masquerade": False,
-        "rand_src_port": False,
-        "jitter_bytes": 0,
-        "preemptive_hop_ms": 1000,
-        "fixed_hop_ms": 0,
-        "keepalive_interval_sec": 20,
-    },
-    "stealth": {
+    "ghost": {
         "obfs": True,
         "masquerade": True,
         "rand_src_port": True,
         "jitter_bytes": 64,
-        "preemptive_hop_ms": common.PREEMPTIVE_HOP_MS,
-        "keepalive_interval_sec": 15,
+        "preemptive_hop_ms": 600,
+        "fixed_hop_ms": 0,
+        "adaptive_mode": True,
+        "startup_capacity_scan": True,
+        "reactive_probe": True,
+        "nuclear_fail_fanout": True,
+        "keepalive_interval_sec": 12,
+        "scan_throttle_threshold_pct": 50.0,
+        "scan_recovery_threshold_pct": 10.0,
+        "declared_up_kbps": 0,
+        "fec_k": 4,
+        "fec_m": 4,
+        "disable_hop": False,
+        "manual_burst_mult": 0,
+    },
+    "survival": {
+        "obfs": False,
+        "masquerade": False,
+        "rand_src_port": False,
+        "jitter_bytes": 0,
+        "preemptive_hop_ms": 700,
+        "fixed_hop_ms": 0,
+        "adaptive_mode": True,
+        "startup_capacity_scan": True,
+        "reactive_probe": True,
+        "nuclear_fail_fanout": True,
+        "keepalive_interval_sec": 10,
+        "scan_throttle_threshold_pct": 30.0,
+        "scan_recovery_threshold_pct": 15.0,
+        "declared_up_kbps": 0,
+        "fec_k": 4,
+        "fec_m": 6,
+        "disable_hop": False,
+        "manual_burst_mult": 8,
     },
     "throughput": {
         "obfs": False,
@@ -83,7 +105,99 @@ PROFILE_PRESETS = {
         "rand_src_port": False,
         "jitter_bytes": 0,
         "preemptive_hop_ms": 0,
+        "fixed_hop_ms": 0,
+        "adaptive_mode": True,
+        "startup_capacity_scan": False,
+        "reactive_probe": False,
+        "nuclear_fail_fanout": False,
+        "keepalive_interval_sec": 20,
+        "scan_throttle_threshold_pct": 80.0,
+        "scan_recovery_threshold_pct": 20.0,
+        "declared_up_kbps": 0,
+        "fec_k": 6,
+        "fec_m": 2,
+        "disable_hop": False,
+        "manual_burst_mult": 0,
+    },
+    "mobile": {
+        "obfs": False,
+        "masquerade": False,
+        "rand_src_port": False,
+        "jitter_bytes": 16,
+        "preemptive_hop_ms": 900,
+        "fixed_hop_ms": 0,
+        "adaptive_mode": True,
+        "startup_capacity_scan": True,
+        "reactive_probe": True,
+        "nuclear_fail_fanout": True,
+        "keepalive_interval_sec": 8,
+        "scan_throttle_threshold_pct": 60.0,
+        "scan_recovery_threshold_pct": 25.0,
+        "declared_up_kbps": 0,
+        "fec_k": 4,
+        "fec_m": 5,
+        "disable_hop": False,
+        "manual_burst_mult": 0,
+    },
+    "tunnel": {
+        "obfs": False,
+        "masquerade": False,
+        "rand_src_port": False,
+        "jitter_bytes": 0,
+        "preemptive_hop_ms": 800,
+        "fixed_hop_ms": 0,
+        "adaptive_mode": True,
+        "startup_capacity_scan": True,
+        "reactive_probe": False,
+        "nuclear_fail_fanout": True,
+        "keepalive_interval_sec": 5,
+        "scan_throttle_threshold_pct": 70.0,
+        "scan_recovery_threshold_pct": 15.0,
+        "declared_up_kbps": 0,
+        "fec_k": 4,
+        "fec_m": 4,
+        "disable_hop": False,
+        "manual_burst_mult": 0,
+    },
+    "reliable": {
+        "obfs": False,
+        "masquerade": False,
+        "rand_src_port": False,
+        "jitter_bytes": 0,
+        "preemptive_hop_ms": 1000,
+        "fixed_hop_ms": 0,
+        "keepalive_interval_sec": 20,
+        "adaptive_mode": True,
+        "startup_capacity_scan": True,
+        "reactive_probe": True,
+        "nuclear_fail_fanout": True,
+        "scan_throttle_threshold_pct": 80.0,
+        "scan_recovery_threshold_pct": 20.0,
+        "declared_up_kbps": 0,
+        "fec_k": 4,
+        "fec_m": 4,
+        "disable_hop": False,
+        "manual_burst_mult": 0,
+    },
+    "stealth": {
+        "obfs": True,
+        "masquerade": True,
+        "rand_src_port": True,
+        "jitter_bytes": 64,
+        "preemptive_hop_ms": common.PREEMPTIVE_HOP_MS,
+        "fixed_hop_ms": 0,
+        "adaptive_mode": True,
+        "startup_capacity_scan": True,
+        "reactive_probe": True,
+        "nuclear_fail_fanout": True,
         "keepalive_interval_sec": 15,
+        "scan_throttle_threshold_pct": 80.0,
+        "scan_recovery_threshold_pct": 20.0,
+        "declared_up_kbps": 0,
+        "fec_k": 4,
+        "fec_m": 4,
+        "disable_hop": False,
+        "manual_burst_mult": 0,
     },
 }
 
@@ -211,6 +325,8 @@ def run_network_diagnostic(cfg: dict, target_ip: str, sni: str, duration_sec: in
         seed=seed,
         obfs=obfs,
         verbose=verbose,
+        declared_rx_kbps=int(cfg.get("declared_down_kbps", 0) or 0),
+        declared_tx_kbps=int(cfg.get("declared_up_kbps", 0) or 0),
     )
     initial_loss = float(initial.get("loss_pct", 100.0))
 
@@ -241,6 +357,8 @@ def run_network_diagnostic(cfg: dict, target_ip: str, sni: str, duration_sec: in
             seed=seed,
             obfs=obfs,
             verbose=verbose,
+            declared_rx_kbps=int(cfg.get("declared_down_kbps", 0) or 0),
+            declared_tx_kbps=int(cfg.get("declared_up_kbps", 0) or 0),
         )
         recovery_loss = float(recovery.get("loss_pct", 100.0))
         udp_port_hopping_bypassed = recovery.get("received", 0) > 0 and recovery_loss < recovery_threshold
@@ -272,7 +390,7 @@ def run_network_diagnostic(cfg: dict, target_ip: str, sni: str, duration_sec: in
 
 def probe_port(server_ip, port, count=20, timeout_ms=2000,
                seed=b"hopshot", obfs=False, resume_store=None,
-               verbose=False):
+               verbose=False, declared_rx_kbps=0, declared_tx_kbps=0):
     """
     Send count probe packets, measure loss% and RTT.
     If resume_store is provided, cache any 0-RTT token carried in the reply.
@@ -295,6 +413,8 @@ def probe_port(server_ip, port, count=20, timeout_ms=2000,
     send_wall_times = {}
     replies    = {}
     offsets    = []
+    server_rx_hints = []
+    server_tx_hints = []
     stop_ev    = threading.Event()
 
     def reader():
@@ -319,6 +439,9 @@ def probe_port(server_ip, port, count=20, timeout_ms=2000,
                         recv_wall_ms = int(time.time() * 1000)
                         midpoint_ms = (send_wall_times[hdr["seq"]] + recv_wall_ms) / 2.0
                         offsets.append(int(server_ts - midpoint_ms))
+                    if len(payload) >= TOKEN_SIZE + 16:
+                        server_rx_hints.append(struct.unpack_from("!I", payload, TOKEN_SIZE + 8)[0])
+                        server_tx_hints.append(struct.unpack_from("!I", payload, TOKEN_SIZE + 12)[0])
             except socket.timeout:
                 pass
             except Exception:
@@ -332,15 +455,17 @@ def probe_port(server_ip, port, count=20, timeout_ms=2000,
     sent = 0
     for i in range(count):
         hdr = common.pack_header(common.TYPE_PROBE, seq=i, session_id=sess_id)
+        hint_payload = struct.pack("!II", int(declared_rx_kbps or 0), int(declared_tx_kbps or 0))
+        pkt = hdr + hint_payload
         if obfs:
-            hdr = common.salamander(hdr, seed)
+            pkt = common.salamander(pkt, seed)
         send_times[i] = time.monotonic()
         send_wall_times[i] = int(time.time() * 1000)
         try:
-            sock.send(hdr)
+            sock.send(pkt)
             sent += 1
             if verbose:
-                log.debug(f"[probe] tx seq={i} {len(hdr)}B")
+                log.debug(f"[probe] tx seq={i} {len(pkt)}B")
         except Exception:
             pass
         time.sleep(interval)
@@ -359,13 +484,17 @@ def probe_port(server_ip, port, count=20, timeout_ms=2000,
     loss = 100.0 * max(sent - received, 0) / max(sent, 1)
     rtt  = rtt_sum / max(received, 1)
     clock_offset_ms = int(sum(offsets) / len(offsets)) if offsets else 0
+    server_rx_kbps = int(sum(server_rx_hints) / len(server_rx_hints)) if server_rx_hints else 0
+    server_tx_kbps = int(sum(server_tx_hints) / len(server_tx_hints)) if server_tx_hints else 0
     log.info(f"[probe] loss={loss:.1f}%  rtt={rtt:.1f}ms  rx={received}/{sent}")
     if verbose:
         missing = sorted(set(send_times) - set(replies))
         log.debug(f"[probe] summary sent={sent} received={received} missing={missing} clock_offset_ms={clock_offset_ms}")
     return {"port": port, "loss_pct": loss, "rtt_ms": rtt,
             "sent": sent, "received": received,
-            "clock_offset_ms": clock_offset_ms}
+            "clock_offset_ms": clock_offset_ms,
+            "server_rx_kbps": server_rx_kbps,
+            "server_tx_kbps": server_tx_kbps}
 
 
 # ─── Reactive pre-probe ───────────────────────────────────────────────────────
@@ -373,7 +502,7 @@ def probe_port(server_ip, port, count=20, timeout_ms=2000,
 def reactive_probe(server_ip, port, seed, obfs,
                    threshold=common.REACTIVE_LOSS_THRESHOLD,
                    resume_store=None, verbose=False,
-                   timeout_ms=800):
+                   timeout_ms=800, declared_rx_kbps=0, declared_tx_kbps=0):
     """
     Quick 5-packet burst to check if current port is being throttled.
     Returns (loss_pct, should_hop).
@@ -381,7 +510,9 @@ def reactive_probe(server_ip, port, seed, obfs,
     """
     r = probe_port(server_ip, port, count=5, timeout_ms=timeout_ms,
                    seed=seed, obfs=obfs, resume_store=resume_store,
-                   verbose=verbose)
+                   verbose=verbose,
+                   declared_rx_kbps=declared_rx_kbps,
+                   declared_tx_kbps=declared_tx_kbps)
     should_hop = r["loss_pct"] >= threshold
     if should_hop:
         log.warning(
@@ -419,6 +550,7 @@ class HopShotClient:
         self.disable_hop  = cfg.get("disable_hop", False)
         self.adaptive_mode = cfg.get("adaptive_mode", True)
         self.max_ping_ms = int(cfg.get("max_ping_ms", 15000) or 15000)
+        self.declared_down_kbps = int(cfg.get("declared_down_kbps", 0) or 0)
         self.nuclear_fail_fanout = cfg.get("nuclear_fail_fanout", True)
         self.reactive_probe_enabled = cfg.get("reactive_probe", self.max_ping_ms <= 5000)
         self.startup_capacity_scan = cfg.get("startup_capacity_scan", True)
@@ -466,9 +598,11 @@ class HopShotClient:
         self._seq_lock    = threading.Lock()
 
         # Brutal CC — single instance shared by both transports
-        self.cc           = brutal.BrutalSender(
-            declared_up_kbps=cfg.get("declared_up_kbps", 0)
-        )
+        declared_up_kbps = int(cfg.get("declared_up_kbps", 0) or 0)
+        if declared_up_kbps > 0:
+            self.cc = brutal.BrutalSender(declared_up_kbps=declared_up_kbps)
+        else:
+            self.cc = brutal.BBRSender()
 
         # Current mode
         self.mode         = common.MODE_NORMAL
@@ -557,6 +691,7 @@ class HopShotClient:
                 f"tunnel_udp_bind={self.tunnel_udp_bind} tunnel_udp_target={self.tunnel_udp_target} "
                 f"disable_hop={self.disable_hop} profile={self.cfg.get('profile', 'balanced')} "
                 f"fec={self.fec_k}x{self.fec_m} declared_up={cfg.get('declared_up_kbps', 0)} "
+                f"declared_down={self.declared_down_kbps} "
                 f"resume_store={self._resume_store.has_token}"
             )
 
@@ -573,6 +708,16 @@ class HopShotClient:
         with self._metrics_lock:
             self._metrics_fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
             self._metrics_fp.flush()
+
+    def _apply_probe_bandwidth_hints(self, result: dict):
+        server_tx_kbps = int(result.get("server_tx_kbps", 0) or 0)
+        if server_tx_kbps <= 0:
+            return
+        set_ceil = getattr(self.cc, "set_ceil_kbps", None)
+        if callable(set_ceil):
+            set_ceil(server_tx_kbps)
+            if self.verbose:
+                log.debug(f"[probe] applied server tx cap={server_tx_kbps}kbps")
 
     # ── Startup ───────────────────────────────────────────────────────────────
 
@@ -592,6 +737,7 @@ class HopShotClient:
             "initial_loss_pct": float(initial_probe.get("loss_pct", 100.0)),
             "recovery_loss_pct": None,
             "recovery_port": None,
+            "mode_progression": [],
         }
         initial_loss = scan["initial_loss_pct"]
         if not self.startup_capacity_scan:
@@ -601,27 +747,43 @@ class HopShotClient:
             return initial_loss, scan
 
         scan["udp_throttled"] = True
-        recovery_port = self._pick_recovery_probe_port()
-        if recovery_port is None:
-            return initial_loss, scan
+        stage_plan = [
+            (common.MODE_MODERATE, 40.0),
+            (common.MODE_HIGH, 70.0),
+            (common.MODE_NUCLEAR, 95.0),
+        ]
+        for stage_mode, stage_loss_hint in stage_plan:
+            self._set_mode(stage_loss_hint)
+            scan["mode_progression"].append(common.MODE_NAMES[stage_mode])
 
-        scan["recovery_port"] = recovery_port
-        recovery = probe_port(
-            self.primary_ip,
-            recovery_port,
-            count=max(5, int(self.cfg.get("probe_count", 20) / 2)),
-            timeout_ms=min(self.cfg.get("probe_timeout_ms", 2000), self.max_ping_ms),
-            seed=self.seed,
-            obfs=self.obfs,
-            resume_store=self._resume_store,
-            verbose=self.verbose,
-        )
-        recovery_loss = float(recovery.get("loss_pct", 100.0))
-        scan["recovery_loss_pct"] = recovery_loss
+            recovery_port = self._pick_recovery_probe_port()
+            if recovery_port is None:
+                continue
 
-        if recovery.get("received", 0) > 0 and recovery_loss < self.scan_recovery_threshold_pct:
-            scan["udp_port_hopping_bypassed"] = True
-            return recovery_loss, scan
+            scan["recovery_port"] = recovery_port
+            recovery = probe_port(
+                self.primary_ip,
+                recovery_port,
+                count=max(5, int(self.cfg.get("probe_count", 20) / 2)),
+                timeout_ms=min(self.cfg.get("probe_timeout_ms", 2000), self.max_ping_ms),
+                seed=self.seed,
+                obfs=self.obfs,
+                resume_store=self._resume_store,
+                verbose=self.verbose,
+                declared_rx_kbps=self.declared_down_kbps,
+                declared_tx_kbps=int(self.cfg.get("declared_up_kbps", 0) or 0),
+            )
+            recovery_loss = float(recovery.get("loss_pct", 100.0))
+            scan["recovery_loss_pct"] = recovery_loss
+            self._apply_probe_bandwidth_hints(recovery)
+
+            if recovery.get("received", 0) > 0 and recovery_loss < self.scan_recovery_threshold_pct:
+                scan["udp_port_hopping_bypassed"] = True
+                return recovery_loss, scan
+
+        self._set_mode(95.0)
+        if not scan["mode_progression"] or scan["mode_progression"][-1] != common.MODE_NAMES[common.MODE_NUCLEAR]:
+            scan["mode_progression"].append(common.MODE_NAMES[common.MODE_NUCLEAR])
         return initial_loss, scan
 
     def start(self):
@@ -644,6 +806,8 @@ class HopShotClient:
                 obfs       = self.obfs,
                 resume_store=self._resume_store,
                 verbose    = self.verbose,
+                declared_rx_kbps=self.declared_down_kbps,
+                declared_tx_kbps=int(self.cfg.get("declared_up_kbps", 0) or 0),
             )
         else:
             result = {
@@ -657,6 +821,7 @@ class HopShotClient:
         if self.verbose:
             log.debug(f"[client] probe result: {result}")
         self._record_metric("probe", **result)
+        self._apply_probe_bandwidth_hints(result)
         self.clock_offset_ms = int(result.get("clock_offset_ms", self.clock_offset_ms))
         if self.verbose:
             log.debug(f"[client] clock offset={self.clock_offset_ms}ms")
@@ -866,6 +1031,8 @@ class HopShotClient:
                 resume_store=self._resume_store,
                 verbose=self.verbose,
                 timeout_ms=reactive_timeout_ms,
+                declared_rx_kbps=self.declared_down_kbps,
+                declared_tx_kbps=int(self.cfg.get("declared_up_kbps", 0) or 0),
             )
         elif self.verbose:
             log.debug("[reactive] skipped (high-latency mode)")
@@ -941,6 +1108,7 @@ class HopShotClient:
                 seq,
                 hop_ms,
                 burst_mult,
+                sock=self._udp_sock if not self.rand_src else None,
                 force_multi_port=nuclear_force_multi_port,
             )
 
@@ -1091,6 +1259,8 @@ class HopShotClient:
             obfs=self.obfs,
             masquerade=self.masquerade,
             transport=common.TRANSPORT_RAW,
+            max_datagram_size=max(64, int(self._mtu or common.MAX_PACKET)),
+            stream_id=stream_id_from_ip_packet(payload),
         )
 
         for shard_idx, pkt in enumerate(encoded.datagrams):
@@ -1245,10 +1415,13 @@ class HopShotClient:
                 count=10, timeout_ms=1500,
                 seed=self.seed, obfs=self.obfs,
                 verbose=self.verbose,
+                declared_rx_kbps=self.declared_down_kbps,
+                declared_tx_kbps=int(self.cfg.get("declared_up_kbps", 0) or 0),
             )
             if self.verbose:
                 log.debug(f"[monitor] probe result: {result}")
             self._record_metric("monitor_probe", **result)
+            self._apply_probe_bandwidth_hints(result)
             new_mode = common.classify_loss(result["loss_pct"])
             with self._mode_lock:
                 old = self.mode
@@ -1421,6 +1594,8 @@ Examples:
                    help="User-declared uplink bandwidth in kbps (0=auto). "
                         "Sets Brutal CC ceiling — prevents ISP QoS triggers. "
                         "Example: --declared-up 50000 for 50Mbps uplink.")
+    p.add_argument("--declared-down",   type=int, default=0,
+                   help="Declared downlink bandwidth hint in kbps sent during probe negotiation")
     p.add_argument("--masquerade",      action="store_true",
                    help="Wrap packets in HTTP/3 QUIC frames for DPI evasion")
     p.add_argument("--mtu",             type=int, default=0,
@@ -1485,6 +1660,7 @@ Examples:
         "tunnel_udp_bind": args.tunnel_udp_bind,
         "tunnel_udp_target": args.tunnel_udp_target,
         "declared_up_kbps":  args.declared_up,
+        "declared_down_kbps": args.declared_down,
         "masquerade":        args.masquerade,
         "mtu":               args.mtu,
         "fec_k":             args.fec_k,

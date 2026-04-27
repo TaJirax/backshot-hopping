@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 import common, fec as fecmod, brutal
 import client as clientmod
 import server as servermod
+import quic_transport as quicmod
 from client import probe_port, HopShotClient, PROFILE_PRESETS, apply_profile_overrides, build_network_recommendation
 from http3_masq import HTTP3Masq
 from resolver import Resolver, _query_resolver, _build_dns_query, _parse_dns_response
@@ -36,7 +37,8 @@ def test(name, fn):
 # ── Mini server helper ────────────────────────────────────────────────────────
 
 def mini_server(port, obfs=False, seed=b"test-seed", jitter=64,
-                probe_token=None, drop_every=0, loss_pct=0, feedback_kbps=1000):
+                probe_token=None, drop_every=0, loss_pct=0, feedback_kbps=1000,
+                probe_server_rx_kbps=0, probe_server_tx_kbps=0):
     """Returns (run_obj, received_list). run_obj.alive=False to stop."""
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -75,6 +77,7 @@ def mini_server(port, obfs=False, seed=b"test-seed", jitter=64,
                           seq=hdr["seq"], session_id=hdr["session_id"])
                     token = probe_token if probe_token is not None else token_mgr.issue(hdr["session_id"])
                     rep += token + struct.pack("!Q", int(time.time() * 1000))
+                    rep += struct.pack("!II", int(probe_server_rx_kbps), int(probe_server_tx_kbps))
                     if obfs: rep = common.salamander(rep, seed)
                     sock.sendto(rep, addr)
                 elif hdr["type"] == common.TYPE_RESUME:
@@ -271,8 +274,40 @@ def t_profile_overrides():
     assert cfg["preemptive_hop_ms"] == 1000
     assert cfg["fixed_hop_ms"] == 0
     assert cfg["keepalive_interval_sec"] == 20
-    assert set(PROFILE_PRESETS) == {"balanced", "reliable", "stealth", "throughput"}
+    expected = {"balanced", "ghost", "survival", "throughput", "mobile", "tunnel", "reliable", "stealth"}
+    assert expected.issubset(set(PROFILE_PRESETS))
 test("profile presets map to safe operator modes", t_profile_overrides)
+
+def t_startup_auto_scan_ramps_step_by_step_to_nuclear():
+    port = 19310 + random.randint(0, 30)
+    c = HopShotClient(base_cfg(port, adaptive_mode=True, jitter_bytes=0, startup_capacity_scan=True))
+    
+    # Mock probe_port to simulate 100% loss  
+    original_probe_port = clientmod.probe_port
+    def fake_probe_port(primary_ip, probe_port_value, **kwargs):
+        return {
+            "port": probe_port_value,
+            "loss_pct": 100.0,
+            "rtt_ms": 0.0,
+            "sent": kwargs.get("count", 0),
+            "received": 0,
+            "clock_offset_ms": 0,
+        }
+    clientmod.probe_port = fake_probe_port
+    
+    try:
+        loss, scan = c._startup_auto_scan({"loss_pct": 100.0})
+        # All three modes should be tried, ending in NUCLEAR
+        modes = scan.get("mode_progression", [])
+        assert loss == 100.0, f"loss should be 100, got {loss}"
+        assert scan["udp_throttled"] is True, "udp_throttled should be True"
+        assert modes == ["moderate", "high", "NUCLEAR"], f"expected mode progression, got {modes}"
+        assert c.mode == common.MODE_NUCLEAR, f"Expected MODE_NUCLEAR={common.MODE_NUCLEAR}, got {c.mode}"
+        assert c.burst_mult == common.MODE_PARAMS[common.MODE_NUCLEAR][1], f"burst_mult should be 8, got {c.burst_mult}"
+    finally:
+        clientmod.probe_port = original_probe_port
+        c.stop()
+test("startup scan escalates failed presets through nuclear mode", t_startup_auto_scan_ramps_step_by_step_to_nuclear)
 
 def t_diag_recommend_udp_quic_when_bypass():
     rec = build_network_recommendation(
@@ -566,6 +601,65 @@ def t_server_tunnel_payload_targets_stable_reply_addr():
     assert all(addr == ("127.0.0.1", 46000) for addr in sent)
 test("server tunnel send targets stable reply address", t_server_tunnel_payload_targets_stable_reply_addr)
 
+def t_send_uses_fixed_udp_socket_when_rand_src_disabled():
+    port = 19480 + random.randint(0, 100)
+    c = HopShotClient(base_cfg(port, rand_src_port=False))
+    c.reactive_probe_enabled = False
+
+    captures = []
+    old_burst = c._burst_send
+    try:
+        def _capture(pkt, shard_idx, seq, hop_ms, burst_mult, sock=None, force_multi_port=False):
+            captures.append(sock)
+            return None
+
+        c._burst_send = _capture
+        c.send(b"nat-stable")
+    finally:
+        c._burst_send = old_burst
+        try:
+            c.stop()
+        except Exception:
+            pass
+
+    assert len(captures) > 0
+    assert all(sock is c._udp_sock for sock in captures)
+test("send path uses fixed udp socket when source randomization is off", t_send_uses_fixed_udp_socket_when_rand_src_disabled)
+
+def t_server_probe_applies_client_rx_hint():
+    cfg = {
+        "listen_port": 19510,
+        "quic_port": 19511,
+        "port_min": 19510,
+        "port_max": 19520,
+        "shared_seed": "test-seed",
+        "declared_down_kbps": 55555,
+    }
+    srv = servermod.HopShotServer(cfg)
+
+    sent = []
+
+    class _FakeSock:
+        def sendto(self, pkt, addr):
+            sent.append((pkt, addr))
+
+    hdr = {
+        "seq": 3,
+        "session_id": 44,
+    }
+    srv._handle_probe(hdr, struct.pack("!II", 12345, 0), ("127.0.0.1", 40001), common.TRANSPORT_RAW, tx_sock=_FakeSock())
+
+    sess = srv._get_session(44, ("127.0.0.1", 40001))
+    assert int(sess.receiver._ceil) == 12345
+    assert len(sent) == 1
+
+    rep_hdr, rep_payload = common.unpack_header(sent[0][0])
+    assert rep_hdr is not None and rep_hdr["type"] == common.TYPE_PROBE_REPLY
+    assert len(rep_payload) >= TOKEN_SIZE + 16
+    assert struct.unpack_from("!I", rep_payload, TOKEN_SIZE + 8)[0] == 55555
+    assert struct.unpack_from("!I", rep_payload, TOKEN_SIZE + 12)[0] == 55555
+test("server probe stores client rx hint and returns server hints", t_server_probe_applies_client_rx_hint)
+
 # ── 5. Deterministic hopping ─────────────────────────────────────────────────
 print("\n[ Deterministic Port Hopping ]")
 
@@ -828,6 +922,7 @@ def t_hdr():
     hdr,_=common.unpack_header(raw)
     assert hdr["seq"]==0xDEAD and hdr["shard_idx"]==3
     assert hdr["transport"]==common.TRANSPORT_QUIC
+    assert hdr["frag_id"] == 0 and hdr["frag_count"] == 1
 test("pack/unpack header roundtrip", t_hdr)
 
 def t_bad_magic():
@@ -859,6 +954,90 @@ def t_tunnel_codec_roundtrip():
     assert recovered == payload
 test("tunnel codec roundtrip", t_tunnel_codec_roundtrip)
 
+def t_stream_multiplexing_roundtrip():
+    payload_a = b"stream-a-payload"
+    payload_b = b"stream-b-payload"
+    encoded_a = encode_datagrams(
+        payload=payload_a,
+        seq=88,
+        session_id=10,
+        seed=b"seed",
+        fec_k=4,
+        fec_m=4,
+        jitter=0,
+        obfs=False,
+        masquerade=False,
+        stream_id=1,
+    )
+    encoded_b = encode_datagrams(
+        payload=payload_b,
+        seq=88,
+        session_id=10,
+        seed=b"seed",
+        fec_k=4,
+        fec_m=4,
+        jitter=0,
+        obfs=False,
+        masquerade=False,
+        stream_id=2,
+    )
+    assembler = DataReassembler(4, 4, 0)
+    recovered = []
+    for pkt in encoded_a.datagrams + encoded_b.datagrams:
+        hdr, body = common.unpack_header(pkt)
+        assert hdr is not None
+        recovered_pkt = assembler.push(hdr, body)
+        if recovered_pkt is not None:
+            recovered.append(recovered_pkt)
+    assert payload_a in recovered and payload_b in recovered
+test("stream multiplexing separates packets by stream id", t_stream_multiplexing_roundtrip)
+
+def t_bbr_fallback_selected_without_declared_uplink():
+    c = HopShotClient(base_cfg(19690, declared_up_kbps=0))
+    try:
+        assert isinstance(c.cc, brutal.BBRSender)
+    finally:
+        c.stop()
+test("BBR fallback is selected when no uplink cap is declared", t_bbr_fallback_selected_without_declared_uplink)
+
+def t_bbr_sender_interface_matches_sender():
+    cc = brutal.BBRSender()
+    cc.pace(64)
+    cc.on_feedback(1000, 20, 0)
+    cc.record_sent(64)
+    rate, rtt = cc.stats()
+    assert rate > 0 and rtt >= 0
+    assert isinstance(cc.rate_kbps, float)
+test("BBR sender exposes the same pacing interface", t_bbr_sender_interface_matches_sender)
+
+def t_tunnel_codec_fragmented_roundtrip():
+    payload = b"frag-" * 300
+    encoded = encode_datagrams(
+        payload=payload,
+        seq=77,
+        session_id=9,
+        seed=b"seed",
+        fec_k=4,
+        fec_m=4,
+        jitter=0,
+        obfs=False,
+        masquerade=False,
+        max_datagram_size=72,
+    )
+    assert len(encoded.datagrams) > 8
+
+    assembler = DataReassembler(4, 4, 0)
+    recovered = None
+    for pkt in encoded.datagrams:
+        hdr, body = common.unpack_header(pkt)
+        assert hdr is not None
+        assert hdr["frag_count"] >= 1
+        maybe = assembler.push(hdr, body)
+        if maybe is not None:
+            recovered = maybe
+    assert recovered == payload
+test("tunnel codec roundtrip with fragmentation", t_tunnel_codec_fragmented_roundtrip)
+
 # ── 12. HTTP/3 masquerading ────────────────────────────────────────────────
 print("\n[ HTTP/3 Masquerade ]")
 
@@ -878,6 +1057,30 @@ def t_http3_masq_roundtrip_large_seq():
     assert HTTP3Masq.unwrap(wrapped, b"test-seed", 300) == inner
     assert HTTP3Masq.unwrap(wrapped, b"wrong-seed") is None
 test("HTTP/3 unwrap works after seq 255 and rejects wrong seed", t_http3_masq_roundtrip_large_seq)
+
+def t_quic_client_first_write_fragments():
+    sent = []
+
+    class _FakeRaw:
+        def send(self, data, *args, **kwargs):
+            sent.append(data)
+            return len(data)
+        def sendall(self, data, *args, **kwargs):
+            sent.append(data)
+        def setsockopt(self, *args, **kwargs):
+            return None
+        def gettimeout(self):
+            return None
+        def settimeout(self, *args, **kwargs):
+            return None
+        def close(self):
+            return None
+
+    proxy = quicmod._FragmentingSocket(_FakeRaw())
+    proxy.sendall(b"HELLOCLIENTHELLO")
+    assert len(sent) == 2
+    assert b"".join(sent) == b"HELLOCLIENTHELLO"
+test("QUIC client first write is fragmented", t_quic_client_first_write_fragments)
 
 # ── 12. Probe + reactive probe ───────────────────────────────────────────────
 print("\n[ Probe / Reactive Probe ]")
@@ -905,6 +1108,29 @@ def t_probe_stores_token():
     assert r["received"] > 0
     assert store.get() == token
 test("probe reply token is cached for 0-RTT resumption", t_probe_stores_token)
+
+def t_probe_negotiates_bandwidth_hints():
+    port = 19380 + random.randint(0, 100)
+    srv, _ = mini_server(
+        port,
+        probe_server_rx_kbps=42000,
+        probe_server_tx_kbps=36000,
+    )
+    time.sleep(0.05)
+    r = probe_port(
+        "127.0.0.1",
+        port,
+        count=5,
+        timeout_ms=1200,
+        seed=b"test-seed",
+        declared_rx_kbps=22000,
+        declared_tx_kbps=18000,
+    )
+    srv.alive = False
+    assert r["received"] > 0
+    assert r["server_rx_kbps"] == 42000
+    assert r["server_tx_kbps"] == 36000
+test("probe bandwidth hint negotiation returns server caps", t_probe_negotiates_bandwidth_hints)
 
 def t_reactive_probe_classifies():
     from client import reactive_probe
@@ -1217,7 +1443,8 @@ def t_startup_scan_port_hopping_recovery_logic():
     calls = []
 
     def fake_probe(server_ip, port, count=20, timeout_ms=2000,
-                   seed=b"hopshot", obfs=False, resume_store=None, verbose=False):
+                   seed=b"hopshot", obfs=False, resume_store=None, verbose=False,
+                   declared_rx_kbps=0, declared_tx_kbps=0):
         calls.append(port)
         if len(calls) == 1:
             return {
@@ -1227,6 +1454,8 @@ def t_startup_scan_port_hopping_recovery_logic():
                 "sent": count,
                 "received": max(1, int(count * 0.9)),
                 "clock_offset_ms": 0,
+                "server_rx_kbps": 0,
+                "server_tx_kbps": 0,
             }
         return {
             "port": port,
@@ -1235,6 +1464,8 @@ def t_startup_scan_port_hopping_recovery_logic():
             "sent": count,
             "received": 1,
             "clock_offset_ms": 0,
+            "server_rx_kbps": 0,
+            "server_tx_kbps": 0,
         }
 
     c = None
