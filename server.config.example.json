@@ -6,7 +6,7 @@
   "shared_seed": "change-me",
   "max_ping_ms": 15000,
   "auto_bind_port_range": true,
-  "auto_bind_port_range_max": 128,
+  "auto_bind_port_range_max": 0,
   "obfs": false,
   "masquerade": false,
   "setup_iptables": false,

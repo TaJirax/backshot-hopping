@@ -29,6 +29,14 @@ set "MANUAL_BURST=0"
 set "KEEPALIVE_SEC=15"
 set "ADAPTIVE_MODE=true"
 set "MAX_PING_MS=15000"
+set "TUNNEL_MODE=off"
+set "TUNNEL_IFACE=hopshot0"
+set "TUNNEL_MTU=1400"
+set "TUNNEL_ADDRESS="
+set "TUNNEL_PEER="
+set "TUNNEL_DEFAULT_ROUTE=false"
+set "TUNNEL_UDP_BIND=127.0.0.1:19090"
+set "TUNNEL_UDP_TARGET="
 set "DECLARED_UP=0"
 set "MTU=0"
 set "FEC_K=4"
@@ -51,6 +59,7 @@ echo %C_BOLD%Quick status:%C_RESET%
 echo   %C_WHITE%Server:%C_RESET% %SERVER%   %C_WHITE%Port:%C_RESET% %PORT%   %C_WHITE%QUIC:%C_RESET% %QUIC_PORT%
 echo   %C_WHITE%Profile:%C_RESET% %PROFILE%   %C_WHITE%Adaptive mode:%C_RESET% %ADAPTIVE_MODE%
 echo   %C_WHITE%Max ping:%C_RESET% %MAX_PING_MS%ms
+echo   %C_WHITE%Tunnel:%C_RESET% %TUNNEL_MODE%   %C_WHITE%Relay:%C_RESET% %TUNNEL_UDP_BIND% -^> %TUNNEL_UDP_TARGET%
 echo   %C_WHITE%Hop disabled:%C_RESET% %DISABLE_HOP%   %C_WHITE%Fixed hop:%C_RESET% %FIXED_HOP_MS%   %C_WHITE%Burst:%C_RESET% %MANUAL_BURST%
 echo   %C_WHITE%Obfs/Masq/Rand:%C_RESET% %OBFS%/%MASQ%/%RAND_SRC%   %C_WHITE%Verbose/JSON:%C_RESET% %VERBOSE%/%JSON_LOGS%
 echo.
@@ -60,12 +69,14 @@ echo %C_GREEN%3.%C_RESET% Mode menu (auto/loss-based)
 echo %C_GREEN%4.%C_RESET% Transport menu
 echo %C_GREEN%5.%C_RESET% Advanced core menu
 echo %C_GREEN%6.%C_RESET% Logging menu
+echo %C_GREEN%7.%C_RESET% Tunnel menu
 echo %C_GREEN%S.%C_RESET% Save config only
 echo %C_GREEN%X.%C_RESET% Exit
 echo.
-choice /c 123456SX /n /m "Select an option:"
-if errorlevel 8 goto :end
-if errorlevel 7 goto :save_only
+choice /c 1234567SX /n /m "Select an option:"
+if errorlevel 9 goto :end
+if errorlevel 8 goto :save_only
+if errorlevel 7 goto :tunnel_menu
 if errorlevel 6 goto :logs_menu
 if errorlevel 5 goto :advanced_menu
 if errorlevel 4 goto :transport_menu
@@ -73,6 +84,40 @@ if errorlevel 3 goto :mode_menu
 if errorlevel 2 goto :network_menu
 if errorlevel 1 goto :start_client
 goto :main_menu
+
+:tunnel_menu
+cls
+echo %C_CYAN%%C_BOLD%[ Tunnel Menu ]%C_RESET%
+echo.
+echo   Tunnel mode: %TUNNEL_MODE%
+echo   Interface: %TUNNEL_IFACE%   MTU: %TUNNEL_MTU%
+echo   Address: %TUNNEL_ADDRESS%
+echo   Peer: %TUNNEL_PEER%
+echo   Default route: %TUNNEL_DEFAULT_ROUTE%
+echo   UDP relay bind: %TUNNEL_UDP_BIND%
+echo   UDP relay target: %TUNNEL_UDP_TARGET%
+echo.
+echo %C_GREEN%1.%C_RESET% Change tunnel mode (off/tun/tap/udp)
+echo %C_GREEN%2.%C_RESET% Set tunnel interface name
+echo %C_GREEN%3.%C_RESET% Set tunnel MTU
+echo %C_GREEN%4.%C_RESET% Set tunnel address
+echo %C_GREEN%5.%C_RESET% Set tunnel peer
+echo %C_GREEN%6.%C_RESET% Toggle tunnel default route
+echo %C_GREEN%7.%C_RESET% Set UDP relay bind endpoint
+echo %C_GREEN%8.%C_RESET% Set UDP relay target endpoint
+echo %C_GREEN%B.%C_RESET% Back
+echo.
+choice /c 12345678B /n /m "Select an option:"
+if errorlevel 9 goto :main_menu
+if errorlevel 8 goto :change_tunnel_udp_target
+if errorlevel 7 goto :change_tunnel_udp_bind
+if errorlevel 6 goto :toggle_tunnel_default_route
+if errorlevel 5 goto :change_tunnel_peer
+if errorlevel 4 goto :change_tunnel_address
+if errorlevel 3 goto :change_tunnel_mtu
+if errorlevel 2 goto :change_tunnel_iface
+if errorlevel 1 goto :change_tunnel_mode
+goto :tunnel_menu
 
 :network_menu
 cls
@@ -308,6 +353,74 @@ if /i "%MAX_PING_MS%"=="b" set "MAX_PING_MS=%OLD_MAX_PING_MS%" & goto :mode_menu
 if not defined MAX_PING_MS set "MAX_PING_MS=%OLD_MAX_PING_MS%"
 goto :mode_menu
 
+:change_tunnel_mode
+set "OLD_TUNNEL_MODE=%TUNNEL_MODE%"
+echo.
+echo Choose tunnel mode:
+echo   1. off
+echo   2. tun
+echo   3. tap
+echo   4. udp (userspace relay)
+echo   B. back
+choice /c 1234B /n /m "Tunnel mode:"
+if errorlevel 5 goto :tunnel_menu
+if errorlevel 4 set "TUNNEL_MODE=udp"
+if errorlevel 3 set "TUNNEL_MODE=tap"
+if errorlevel 2 set "TUNNEL_MODE=tun"
+if errorlevel 1 set "TUNNEL_MODE=off"
+if not defined TUNNEL_MODE set "TUNNEL_MODE=%OLD_TUNNEL_MODE%"
+goto :tunnel_menu
+
+:change_tunnel_iface
+set "OLD_TUNNEL_IFACE=%TUNNEL_IFACE%"
+set /p "TUNNEL_IFACE=Tunnel interface name (B=back) [%TUNNEL_IFACE%]: "
+if /i "%TUNNEL_IFACE%"=="b" set "TUNNEL_IFACE=%OLD_TUNNEL_IFACE%" & goto :tunnel_menu
+if not defined TUNNEL_IFACE set "TUNNEL_IFACE=%OLD_TUNNEL_IFACE%"
+goto :tunnel_menu
+
+:change_tunnel_mtu
+set "OLD_TUNNEL_MTU=%TUNNEL_MTU%"
+set /p "TUNNEL_MTU=Tunnel MTU (B=back) [%TUNNEL_MTU%]: "
+if /i "%TUNNEL_MTU%"=="b" set "TUNNEL_MTU=%OLD_TUNNEL_MTU%" & goto :tunnel_menu
+if not defined TUNNEL_MTU set "TUNNEL_MTU=%OLD_TUNNEL_MTU%"
+goto :tunnel_menu
+
+:change_tunnel_address
+set "OLD_TUNNEL_ADDRESS=%TUNNEL_ADDRESS%"
+set /p "TUNNEL_ADDRESS=Tunnel address CIDR (blank=none, B=back) [%TUNNEL_ADDRESS%]: "
+if /i "%TUNNEL_ADDRESS%"=="b" set "TUNNEL_ADDRESS=%OLD_TUNNEL_ADDRESS%" & goto :tunnel_menu
+goto :tunnel_menu
+
+:change_tunnel_peer
+set "OLD_TUNNEL_PEER=%TUNNEL_PEER%"
+set /p "TUNNEL_PEER=Tunnel peer address (blank=none, B=back) [%TUNNEL_PEER%]: "
+if /i "%TUNNEL_PEER%"=="b" set "TUNNEL_PEER=%OLD_TUNNEL_PEER%" & goto :tunnel_menu
+goto :tunnel_menu
+
+:toggle_tunnel_default_route
+choice /c YNB /n /m "Toggle tunnel default route? (Y=yes, N=no, B=back): "
+if errorlevel 3 goto :tunnel_menu
+if errorlevel 2 goto :tunnel_menu
+if /i "%TUNNEL_DEFAULT_ROUTE%"=="true" (
+  set "TUNNEL_DEFAULT_ROUTE=false"
+) else (
+  set "TUNNEL_DEFAULT_ROUTE=true"
+)
+goto :tunnel_menu
+
+:change_tunnel_udp_bind
+set "OLD_TUNNEL_UDP_BIND=%TUNNEL_UDP_BIND%"
+set /p "TUNNEL_UDP_BIND=UDP relay bind host:port (B=back) [%TUNNEL_UDP_BIND%]: "
+if /i "%TUNNEL_UDP_BIND%"=="b" set "TUNNEL_UDP_BIND=%OLD_TUNNEL_UDP_BIND%" & goto :tunnel_menu
+if not defined TUNNEL_UDP_BIND set "TUNNEL_UDP_BIND=%OLD_TUNNEL_UDP_BIND%"
+goto :tunnel_menu
+
+:change_tunnel_udp_target
+set "OLD_TUNNEL_UDP_TARGET=%TUNNEL_UDP_TARGET%"
+set /p "TUNNEL_UDP_TARGET=UDP relay target host:port (blank=auto peer, B=back) [%TUNNEL_UDP_TARGET%]: "
+if /i "%TUNNEL_UDP_TARGET%"=="b" set "TUNNEL_UDP_TARGET=%OLD_TUNNEL_UDP_TARGET%" & goto :tunnel_menu
+goto :tunnel_menu
+
 :toggle_obfs
 choice /c YNB /n /m "Toggle obfs? (Y=yes, N=no, B=back): "
 if errorlevel 3 goto :transport_menu
@@ -444,18 +557,9 @@ goto :main_menu
 
 :write_config
 setlocal EnableDelayedExpansion
-set "DEST_JSON="
-set "DEST_LIST=%DESTINATIONS:,= %"
-for %%A in (!DEST_LIST!) do (
-  set "TOKEN=%%~A"
-  if not "!TOKEN!"=="" (
-    if defined DEST_JSON (
-      set "DEST_JSON=!DEST_JSON!, "
-    )
-    set "DEST_JSON=!DEST_JSON!""!TOKEN!"""
-  )
-)
-if not defined DEST_JSON set "DEST_JSON=""127.0.0.1"""
+set "DEST_CLEAN=!DESTINATIONS: =!"
+if not defined DEST_CLEAN set "DEST_CLEAN=127.0.0.1"
+set "DEST_JSON=!DEST_CLEAN:,=\",\"!"
 (
   echo {
   echo   "server_port": %PORT%,
@@ -474,6 +578,26 @@ if not defined DEST_JSON set "DEST_JSON=""127.0.0.1"""
   echo   "fixed_hop_ms": %FIXED_HOP_MS%,
   echo   "manual_burst_mult": %MANUAL_BURST%,
   echo   "keepalive_interval_sec": %KEEPALIVE_SEC%,
+  echo   "tunnel_mode": "%TUNNEL_MODE%",
+  echo   "tunnel_iface": "%TUNNEL_IFACE%",
+  echo   "tunnel_mtu": %TUNNEL_MTU%,
+  if defined TUNNEL_ADDRESS (
+    echo   "tunnel_address": "%TUNNEL_ADDRESS%",
+  ) else (
+    echo   "tunnel_address": null,
+  )
+  if defined TUNNEL_PEER (
+    echo   "tunnel_peer": "%TUNNEL_PEER%",
+  ) else (
+    echo   "tunnel_peer": null,
+  )
+  echo   "tunnel_route_default": %TUNNEL_DEFAULT_ROUTE%,
+  echo   "tunnel_udp_bind": "%TUNNEL_UDP_BIND%",
+  if defined TUNNEL_UDP_TARGET (
+    echo   "tunnel_udp_target": "%TUNNEL_UDP_TARGET%",
+  ) else (
+    echo   "tunnel_udp_target": null,
+  )
   echo   "declared_up_kbps": %DECLARED_UP%,
   echo   "masquerade": %MASQ%,
   echo   "mtu": %MTU%,
@@ -481,7 +605,7 @@ if not defined DEST_JSON set "DEST_JSON=""127.0.0.1"""
   echo   "fec_m": %FEC_M%,
   echo   "probe_count": %PROBE_COUNT%,
   echo   "probe_timeout_ms": %PROBE_TIMEOUT%,
-  echo   "destinations": [!DEST_JSON!],
+  echo   "destinations": ["!DEST_JSON!"],
   echo   "resolvers": ["1.1.1.1"],
   echo   "verbose": %VERBOSE%,
   echo   "log_file": "client.log",

@@ -2,11 +2,25 @@
 __pycache__/
 *.pyc
 .pytest_cache/
+.coverage
+.mypy_cache/
+.ruff_cache/
 build/
 dist/
 *.egg-info/
 server.config.json
 client.config.json
 *.log
+*.tmp
+*.temp
+*.bak
+*.orig
 .continue
 new-mcp-server.yaml
+
+# Ignore test files/directories by default...
+test_*.py
+tests/
+
+# ...but keep the main integration suite tracked.
+!test_hopshot.py

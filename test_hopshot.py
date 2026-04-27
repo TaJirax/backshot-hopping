@@ -3,16 +3,18 @@
 HopShot integration tests — covers every feature.
 Run: python3 test_hopshot.py
 """
-import os, sys, socket, struct, threading, time, random
+import os, sys, socket, struct, threading, time, random, tempfile, subprocess, shutil
 sys.path.insert(0, os.path.dirname(__file__))
 
 import common, fec as fecmod, brutal
 import client as clientmod
+import server as servermod
 from client import probe_port, HopShotClient, PROFILE_PRESETS, apply_profile_overrides, build_network_recommendation
 from http3_masq import HTTP3Masq
 from resolver import Resolver, _query_resolver, _build_dns_query, _parse_dns_response
 from session_resume import ResumeTokenStore, TOKEN_SIZE, SessionTokenManager
 from tunnel_codec import DataReassembler, encode_datagrams
+import deploy as deploymod
 from version import __version__
 
 PASS = "\033[92m✓\033[0m"
@@ -306,6 +308,161 @@ def t_udp_endpoint_parser():
     else:
         raise AssertionError("expected ValueError for invalid endpoint")
 test("userspace UDP endpoint parser validates host:port", t_udp_endpoint_parser)
+
+def t_deploy_defaults_include_tunnel_udp_fields():
+    assert "tunnel_udp_bind" in deploymod.SERVER_DEFAULT_CONFIG
+    assert "tunnel_udp_target" in deploymod.SERVER_DEFAULT_CONFIG
+    assert "tunnel_udp_bind" in deploymod.CLIENT_DEFAULT_CONFIG
+    assert "tunnel_udp_target" in deploymod.CLIENT_DEFAULT_CONFIG
+test("deploy default configs include userspace UDP relay fields", t_deploy_defaults_include_tunnel_udp_fields)
+
+def t_deploy_default_server_bind_limit_unlimited():
+    assert int(deploymod.SERVER_DEFAULT_CONFIG.get("auto_bind_port_range_max", -1)) == 0
+test("deploy default server bind limit is unlimited", t_deploy_default_server_bind_limit_unlimited)
+
+def t_deploy_easy_server_normalizes_and_auto_seeds():
+    old_root = deploymod.ROOT
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            td_path = os.path.abspath(td)
+            deploymod.ROOT = deploymod.Path(td_path)
+
+            # Malformed client config should not crash seed sync in easy mode.
+            bad_client = os.path.join(td_path, "client.config.json")
+            with open(bad_client, "w", encoding="utf-8") as f:
+                f.write('{"broken": true')
+
+            server_path = os.path.join(td_path, "server.config.json")
+            with open(server_path, "w", encoding="utf-8") as f:
+                f.write('{"shared_seed":"change-me","listen_port":10000,"port_min":20000,"port_max":10000}')
+
+            cfg, notes = deploymod.ensure_server_config_ready(deploymod.Path(server_path), auto_seed=True)
+            assert cfg["port_min"] == 10000 and cfg["port_max"] == 20000
+            assert cfg["shared_seed"] != "change-me"
+            assert int(cfg.get("auto_bind_port_range_max", -1)) == 0
+            assert any("Generated a fresh shared_seed" in note for note in notes)
+            assert any("Skipped client.config.json seed sync" in note for note in notes)
+    finally:
+        deploymod.ROOT = old_root
+test("deploy easy mode normalizes ports and tolerates malformed client config", t_deploy_easy_server_normalizes_and_auto_seeds)
+
+def t_server_launch_sh_sanity():
+    script_path = os.path.join(os.path.dirname(__file__), "server-launch.sh")
+    assert os.path.exists(script_path)
+    text = open(script_path, "r", encoding="utf-8").read()
+    assert "Easy setup + start server" in text
+    assert "Edit server config" in text
+    assert "--easy" in text and "--diagnose" in text
+
+    sh_bin = shutil.which("sh")
+    if sh_bin:
+        subprocess.run([sh_bin, "-n", script_path], check=True)
+test("linux launcher script is present and shell-parseable", t_server_launch_sh_sanity)
+
+def t_server_setup_iptables_returns_bool():
+    cfg = {
+        "listen_port": 19000,
+        "quic_port": 19001,
+        "port_min": 19000,
+        "port_max": 19010,
+        "shared_seed": "test-seed",
+        "setup_iptables": True,
+    }
+    srv = servermod.HopShotServer(cfg)
+
+    old_run = servermod.subprocess.run
+    try:
+        def _ok_run(*args, **kwargs):
+            class _R:
+                returncode = 0
+            return _R()
+
+        def _fail_run(*args, **kwargs):
+            raise RuntimeError("iptables unavailable")
+
+        servermod.subprocess.run = _ok_run
+        assert srv._setup_iptables() is True
+
+        servermod.subprocess.run = _fail_run
+        assert srv._setup_iptables() is False
+    finally:
+        servermod.subprocess.run = old_run
+test("server iptables setup reports success/failure", t_server_setup_iptables_returns_bool)
+
+def t_server_fallback_bind_uses_force_when_iptables_fails():
+    cfg = {
+        "listen_port": 19100,
+        "quic_port": 19101,
+        "port_min": 19100,
+        "port_max": 19102,
+        "shared_seed": "test-seed",
+        "setup_iptables": True,
+        "auto_bind_port_range": True,
+        "auto_bind_port_range_max": 0,
+        "certfile": "hopshot.crt",
+        "keyfile": "hopshot.key",
+    }
+    srv = servermod.HopShotServer(cfg)
+
+    calls = {"bind_force": []}
+
+    class _FakeSock:
+        def setsockopt(self, *args, **kwargs):
+            return None
+        def bind(self, *args, **kwargs):
+            return None
+        def close(self):
+            return None
+
+    old_socket = servermod.socket.socket
+    old_setup = servermod.HopShotServer._setup_iptables
+    old_bind = servermod.HopShotServer._bind_additional_udp_ports_if_needed
+    old_quic = servermod.QUICServer
+    old_cert = servermod.generate_selfsigned_cert
+    old_thread = servermod.threading.Thread
+
+    try:
+        servermod.socket.socket = lambda *a, **k: _FakeSock()
+        servermod.HopShotServer._setup_iptables = lambda self: False
+
+        def _capture_bind(self, force=False):
+            calls["bind_force"].append(force)
+
+        servermod.HopShotServer._bind_additional_udp_ports_if_needed = _capture_bind
+
+        class _FakeQUIC:
+            def __init__(self, *args, **kwargs):
+                self.data_callback = None
+            def start(self):
+                return None
+            def stop(self):
+                return None
+
+        servermod.QUICServer = _FakeQUIC
+        servermod.generate_selfsigned_cert = lambda *a, **k: None
+
+        class _FakeThread:
+            def __init__(self, target=None, args=(), daemon=None):
+                self.target = target
+            def start(self):
+                return None
+
+        servermod.threading.Thread = _FakeThread
+
+        srv.start()
+        assert calls["bind_force"] == [True]
+    finally:
+        servermod.socket.socket = old_socket
+        servermod.HopShotServer._setup_iptables = old_setup
+        servermod.HopShotServer._bind_additional_udp_ports_if_needed = old_bind
+        servermod.QUICServer = old_quic
+        servermod.generate_selfsigned_cert = old_cert
+        servermod.threading.Thread = old_thread
+        try:
+            srv.stop()
+        except Exception:
+            pass
+test("server falls back to forced bind if iptables fails", t_server_fallback_bind_uses_force_when_iptables_fails)
 
 # ── 5. Deterministic hopping ─────────────────────────────────────────────────
 print("\n[ Deterministic Port Hopping ]")

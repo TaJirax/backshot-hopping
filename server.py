@@ -195,7 +195,17 @@ class HopShotServer:
         self.udp_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         self.udp_sock.bind(("0.0.0.0", self.listen_port))
         log.info(f"Raw UDP listening on :{self.listen_port}")
-        self._bind_additional_udp_ports_if_needed()
+
+        iptables_ok = False
+        if self.cfg.get("setup_iptables", False):
+            iptables_ok = self._setup_iptables()
+            if not iptables_ok:
+                log.warning(
+                    "[compat] iptables redirect unavailable; falling back to direct UDP binds"
+                )
+                self._bind_additional_udp_ports_if_needed(force=True)
+        else:
+            self._bind_additional_udp_ports_if_needed()
 
         # QUIC (TLS 1.3)
         try:
@@ -210,10 +220,6 @@ class HopShotServer:
             log.info(f"QUIC (TLS 1.3) listening on :{self.quic_port}")
         except Exception as e:
             log.warning(f"QUIC init failed (continuing raw-UDP only): {e}")
-
-        # iptables
-        if self.cfg.get("setup_iptables", False):
-            self._setup_iptables()
 
         # Threads
         threading.Thread(target=self._udp_loop,     daemon=True).start()
@@ -232,8 +238,8 @@ class HopShotServer:
 
     # ── UDP receive loop ──────────────────────────────────────────────────────
 
-    def _bind_additional_udp_ports_if_needed(self):
-        if self.cfg.get("setup_iptables", False):
+    def _bind_additional_udp_ports_if_needed(self, force: bool = False):
+        if self.cfg.get("setup_iptables", False) and not force:
             return
 
         auto_bind = self.cfg.get("auto_bind_port_range", True)
@@ -246,10 +252,14 @@ class HopShotServer:
             return
 
         span = self.port_max - self.port_min + 1
-        max_bind = int(self.cfg.get("auto_bind_port_range_max", 128) or 128)
+        max_bind_raw = self.cfg.get("auto_bind_port_range_max", 0)
+        try:
+            max_bind = int(max_bind_raw)
+        except Exception:
+            max_bind = 0
         if span <= 1:
             return
-        if span > max_bind:
+        if max_bind > 0 and span > max_bind:
             log.warning(
                 f"[compat] port range span={span} too large for direct bind limit={max_bind}; "
                 "configure setup_iptables=true or narrow the port range"
@@ -716,7 +726,7 @@ class HopShotServer:
 
     # ── iptables ──────────────────────────────────────────────────────────────
 
-    def _setup_iptables(self):
+    def _setup_iptables(self) -> bool:
         rule = [
             "iptables", "-t", "nat", "-A", "PREROUTING",
             "-p", "udp",
@@ -728,8 +738,10 @@ class HopShotServer:
             log.info(
                 f"iptables: UDP {self.port_min}-{self.port_max} → {self.listen_port}"
             )
+            return True
         except Exception as e:
             log.warning(f"iptables failed (need root?): {e}")
+            return False
 
     def _remove_iptables(self):
         rule = [

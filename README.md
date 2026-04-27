@@ -61,6 +61,13 @@ The first run creates the virtual environment, installs the available packages, 
 `python deploy.py genkey` writes a fresh cryptographically random `shared_seed` into both local config files. This replaces the example placeholder seed and ensures both client and server use the same secret key for encryption. **Without this step, both sides will use the default example seed and may conflict with other HopShot deployments.**
 
 For Windows users, there is also a simple menu launcher: `client-launch.bat`. It gives you a tiny text UI, writes `client.config.json`, and then starts the client through the bootstrapper.
+For server-side Windows setup, use `server-launch.bat` for one-click easy setup/start/diagnose.
+For Linux servers, use `server-launch.sh` for the same easy menu flow, including config editing.
+
+```bash
+chmod +x server-launch.sh
+./server-launch.sh
+```
 
 #### 1. Server (Manual)
 
@@ -137,7 +144,7 @@ python server.py --seed "my-secret" \
 Without `--tunnel-udp-target`, each side will send return traffic to the most
 recent local UDP source that wrote into the relay socket.
 
-Tunnel mode requires Linux, root privileges, and `iproute2`. On Windows, install Wintun or Cloudflare WARP and run the CLI with administrator rights. TAP mode is still exposed in the CLI, but on Windows it falls back to Wintun-backed TUN.
+TUN/TAP mode requires Linux root privileges plus `iproute2`, or Wintun on Windows (for Windows run the CLI with administrator rights). Userspace UDP relay mode (`--tunnel-mode udp`) does not require kernel TUN/TAP privileges.
 
 ### Security note
 
@@ -154,6 +161,23 @@ python server.py --diagnose
 ### Deployment on server
 
 This is the recommended server flow (validated with `deploy.py server --prepare-only` and `deploy.py server --diagnose`).
+
+Quick path (recommended):
+
+```bash
+python deploy.py server --easy --prepare-only
+python deploy.py server --easy
+```
+
+`--easy` normalizes server config defaults and auto-generates a strong `shared_seed` if it is still the placeholder.
+
+Linux helper path:
+
+```bash
+./server-launch.sh
+```
+
+Inside the Linux launcher, choose `Edit server config` to quickly tune settings like `listen_port`, `quic_port`, `port_min`, `port_max`, `tunnel_mode`, and logging.
 
 1. Copy the repository to the server host and enter the folder.
 2. Run a safe bootstrap first:
