@@ -1014,7 +1014,11 @@ class HopShotClient:
                 )
 
             try:
-                if sock is None and not self.rand_src:
+                if sock is None and self._transport_sock is not None:
+                    # Tunnel mode must keep a stable source port so server return
+                    # traffic consistently reaches the tunnel RX socket.
+                    self._transport_sock.sendto(pkt, (dest_ip, dst_port))
+                elif sock is None and not self.rand_src:
                     out_sock = self._transport_sock if self._transport_sock is not None else self._udp_sock
                     out_sock.sendto(pkt, (dest_ip, dst_port))
                 elif sock is None:
@@ -1173,8 +1177,8 @@ class HopShotClient:
         if self.masquerade:
             pkt = HTTP3Masq.wrap(pkt, self.seed, self._seq)
         try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-                sock.sendto(pkt, (self.primary_ip, dst_port))
+            out_sock = self._transport_sock if self._transport_sock is not None else self._udp_sock
+            out_sock.sendto(pkt, (self.primary_ip, dst_port))
             self.cc.record_sent(len(pkt))
             if self.verbose:
                 log.debug(f"[keepalive] -> {self.primary_ip}:{dst_port} {len(pkt)}B")

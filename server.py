@@ -86,6 +86,7 @@ class Session:
     def __init__(self, session_id: int, addr, declared_down_kbps: float = 0):
         self.session_id = session_id
         self.addr       = addr
+        self.reply_addr = addr
         self.groups     = {}          # seq → ShardGroup
         self.lock       = threading.Lock()
         self.last_seen  = time.monotonic()
@@ -438,7 +439,8 @@ class HopShotServer:
             pass
 
     def _send_tunnel_payload(self, payload: bytes, sess: Session):
-        if sess.addr is None:
+        target_addr = sess.reply_addr or sess.addr
+        if target_addr is None:
             return
 
         with self._tun_seq_lock:
@@ -460,10 +462,10 @@ class HopShotServer:
 
         for pkt in encoded.datagrams:
             try:
-                self.udp_sock.sendto(pkt, sess.addr)
+                self.udp_sock.sendto(pkt, target_addr)
             except Exception:
                 if self.verbose:
-                    log.exception(f"[tunnel] send failed sess={sess.session_id} addr={sess.addr}")
+                    log.exception(f"[tunnel] send failed sess={sess.session_id} addr={target_addr}")
 
     def _tunnel_tx_loop(self):
         """Read IP packets from server TUN device and send them to connected clients."""
@@ -535,6 +537,10 @@ class HopShotServer:
         sess = self._get_session(sid, addr)
         sess.last_seen = time.monotonic()
         sess.receiver.on_packet(seq, len(payload))
+        if addr is not None:
+            # Keep tunnel return path pinned to the latest data socket, not
+            # transient probe/keepalive source ports.
+            sess.reply_addr = addr
 
         if self.verbose:
             log.debug(
@@ -621,7 +627,8 @@ class HopShotServer:
 
         # Send Brutal CC feedback back to client
         fb = sess.receiver.feedback()
-        if fb and addr:
+        feedback_addr = sess.reply_addr or addr or sess.addr
+        if fb and feedback_addr:
             recv_kbps, rtt_ms, loss_pct = fb
             bw_payload = common.pack_bw_feedback(recv_kbps, rtt_ms, loss_pct)
             reply_hdr  = common.pack_header(
@@ -634,7 +641,7 @@ class HopShotServer:
             if self.obfs:
                 pkt = common.salamander(pkt, self.seed)
             try:
-                tx_sock.sendto(pkt, addr)
+                tx_sock.sendto(pkt, feedback_addr)
             except Exception:
                 pass
             log.info(
@@ -653,7 +660,8 @@ class HopShotServer:
                 sessions = list(self.sessions.values())
             for sess in sessions:
                 fb = sess.receiver.feedback()
-                if fb is None or sess.addr is None:
+                target_addr = sess.reply_addr or sess.addr
+                if fb is None or target_addr is None:
                     if self.verbose and fb is None:
                         log.debug(f"[BrutalCC] skip sess={sess.session_id} no feedback yet")
                     continue
@@ -672,7 +680,7 @@ class HopShotServer:
                 if self.obfs:
                     pkt = common.salamander(pkt, self.seed)
                 try:
-                    self.udp_sock.sendto(pkt, sess.addr)
+                    self.udp_sock.sendto(pkt, target_addr)
                 except Exception:
                     if self.verbose:
                         log.exception(f"[BrutalCC] feedback send failed sess={sess.session_id}")

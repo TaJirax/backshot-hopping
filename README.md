@@ -121,6 +121,14 @@ python server.py --seed "my-secret" \
   --tunnel-address 10.7.0.1/30
 ```
 
+Real-world checklist for TUN mode:
+
+- Use matching /30 endpoints (for example client `10.7.0.2/30`, server `10.7.0.1/30`).
+- Set client `--tunnel-peer` to the server tunnel IP.
+- Enable `--tunnel-default-route` on the client when you want browser/system traffic to traverse HopShot.
+- Keep server `--tunnel-default-route` disabled unless this host should also route all outbound traffic via its tunnel interface.
+- Run with elevated privileges (Linux root for `/dev/net/tun` and route changes, Windows Administrator for Wintun/IP routing).
+
 ### Userspace UDP relay mode (alternative to TUN/TAP)
 
 If TUN/TAP is unavailable, run both sides with `--tunnel-mode udp`.

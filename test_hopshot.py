@@ -464,6 +464,108 @@ def t_server_fallback_bind_uses_force_when_iptables_fails():
             pass
 test("server falls back to forced bind if iptables fails", t_server_fallback_bind_uses_force_when_iptables_fails)
 
+def t_client_keepalive_uses_transport_socket_in_tunnel_mode():
+    tmp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    tmp.bind(("127.0.0.1", 0))
+    bind_port = tmp.getsockname()[1]
+    tmp.close()
+
+    cfg = base_cfg(
+        19200,
+        tunnel_mode="udp",
+        tunnel_udp_bind=f"127.0.0.1:{bind_port}",
+        tunnel_udp_target="127.0.0.1:19091",
+        keepalive_interval_sec=15,
+    )
+    c = HopShotClient(cfg)
+
+    calls = []
+
+    class _FakeTransport:
+        def sendto(self, pkt, addr):
+            calls.append((len(pkt), addr))
+
+    old_socket = clientmod.socket.socket
+    old_transport = c._transport_sock
+    try:
+        c._transport_sock = _FakeTransport()
+
+        def _no_ephemeral(*args, **kwargs):
+            raise AssertionError("keepalive should not open ephemeral UDP sockets in tunnel mode")
+
+        clientmod.socket.socket = _no_ephemeral
+        c._send_keepalive()
+        assert len(calls) == 1
+        assert calls[0][1][0] == "127.0.0.1"
+    finally:
+        clientmod.socket.socket = old_socket
+        c._transport_sock = old_transport
+        try:
+            c._udp_sock.close()
+        except Exception:
+            pass
+        try:
+            if old_transport is not None:
+                old_transport.close()
+        except Exception:
+            pass
+        try:
+            if c._tunnel_udp_sock is not None:
+                c._tunnel_udp_sock.close()
+        except Exception:
+            pass
+test("client keepalive uses stable transport socket in tunnel mode", t_client_keepalive_uses_transport_socket_in_tunnel_mode)
+
+def t_server_keepalive_does_not_poison_tunnel_reply_address():
+    cfg = {
+        "listen_port": 19210,
+        "quic_port": 19211,
+        "port_min": 19210,
+        "port_max": 19220,
+        "shared_seed": "test-seed",
+    }
+    srv = servermod.HopShotServer(cfg)
+
+    sid = 77
+    stable_addr = ("127.0.0.1", 40001)
+    hop_addr = ("127.0.0.1", 50002)
+    sess = srv._get_session(sid, stable_addr)
+    sess.reply_addr = stable_addr
+
+    srv._handle_keepalive({"session_id": sid}, hop_addr)
+
+    assert sess.addr == hop_addr
+    assert sess.reply_addr == stable_addr
+test("server keepalive updates last-seen addr but preserves tunnel reply addr", t_server_keepalive_does_not_poison_tunnel_reply_address)
+
+def t_server_tunnel_payload_targets_stable_reply_addr():
+    cfg = {
+        "listen_port": 19230,
+        "quic_port": 19231,
+        "port_min": 19230,
+        "port_max": 19240,
+        "shared_seed": "test-seed",
+        "fec_k": 1,
+        "fec_m": 0,
+        "jitter_bytes": 0,
+    }
+    srv = servermod.HopShotServer(cfg)
+    sess = servermod.Session(99, ("127.0.0.1", 45000))
+    sess.reply_addr = ("127.0.0.1", 46000)
+
+    sent = []
+
+    class _FakeSock:
+        def sendto(self, pkt, addr):
+            sent.append(addr)
+
+    srv.udp_sock = _FakeSock()
+    srv._send_tunnel_payload(b"hello", sess)
+
+    assert len(sent) >= 1
+    assert all(addr == ("127.0.0.1", 46000) for addr in sent)
+test("server tunnel send targets stable reply address", t_server_tunnel_payload_targets_stable_reply_addr)
+
 # ── 5. Deterministic hopping ─────────────────────────────────────────────────
 print("\n[ Deterministic Port Hopping ]")
 
