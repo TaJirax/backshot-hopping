@@ -832,7 +832,7 @@ class HopShotClient:
             pkt = common.salamander(pkt, self.seed)
         if self.masquerade:
             pkt = HTTP3Masq.wrap(pkt, self.seed, seq)
-        self.cc.pace(len(pkt))
+        self._cc_pace(len(pkt))
         self._burst_send(pkt, 0, seq, hop_ms, burst_mult, sock=self._udp_sock if not self.rand_src else None)
 
     def _start_proxy_listener(self):
@@ -1788,10 +1788,10 @@ class HopShotClient:
         )
 
         for shard_idx, pkt in enumerate(encoded.datagrams):
-            self.cc.pace(len(pkt))
+            self._cc_pace(len(pkt))
             self._burst_send(pkt, shard_idx, seq, hop_ms, burst_mult, sock=self._transport_sock)
 
-        rate, rtt = self.cc.stats()
+        rate, rtt = self._cc_stats()
         self._record_metric("tunnel_send", seq=seq, rate=rate, rtt=rtt, payload=len(payload))
 
     def _tunnel_rx_loop(self):
@@ -1873,7 +1873,7 @@ class HopShotClient:
         try:
             out_sock = self._transport_sock if self._transport_sock is not None else self._udp_sock
             out_sock.sendto(pkt, (self.primary_ip, dst_port))
-            self.cc.record_sent(len(pkt))
+            self._cc_record_sent(len(pkt))
             if self.verbose:
                 log.debug(f"[keepalive] -> {self.primary_ip}:{dst_port} {len(pkt)}B")
         except Exception as e:

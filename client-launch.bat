@@ -253,7 +253,7 @@ echo %C_GREEN%A.%C_RESET% Change scan throttle threshold %%
 echo %C_GREEN%B.%C_RESET% Change scan recovery threshold %%
 echo %C_GREEN%C.%C_RESET% Back
 echo.
-choice /c 123456789ABCB /n /m "Select an option:"
+choice /c 123456789ABC /n /m "Select an option:"
 if errorlevel 12 goto :main_menu
 if errorlevel 11 goto :change_scan_recovery_threshold
 if errorlevel 10 goto :change_scan_throttle_threshold

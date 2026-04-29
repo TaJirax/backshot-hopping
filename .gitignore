@@ -24,3 +24,7 @@ tests/
 
 # ...but keep the main integration suite tracked.
 !test_hopshot.py
+
+# Local ad-hoc reliability checks (not part of committed suite)
+scripts/check_*.py
+scripts/quick_test_runner.py
