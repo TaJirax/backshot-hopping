@@ -40,13 +40,15 @@ HEADER_SIZE = 16
 MODE_NORMAL   = 0   # loss < 30%  | no hop       | burst x1
 MODE_MODERATE = 1   # loss 30-60% | hop 3000 ms  | burst x2
 MODE_HIGH     = 2   # loss 60-80% | hop 1500 ms  | burst x4
-MODE_NUCLEAR  = 3   # loss > 80%  | hop 1000 ms  | burst x8
+MODE_NUCLEAR  = 3   # loss 80-90% | hop 1000 ms  | burst x8
+MODE_ULTRA_NUC = 4  # loss >= 90% | hop 800 ms   | burst x10..x16 (client-scored)
 
 MODE_NAMES = {
     MODE_NORMAL:   "normal",
     MODE_MODERATE: "moderate",
     MODE_HIGH:     "high",
     MODE_NUCLEAR:  "NUCLEAR",
+    MODE_ULTRA_NUC: "ULTRA_NUC",
 }
 
 MODE_PARAMS = {
@@ -55,6 +57,7 @@ MODE_PARAMS = {
     MODE_MODERATE: (3000, 2),
     MODE_HIGH:     (1500, 4),
     MODE_NUCLEAR:  (1000, 8),
+    MODE_ULTRA_NUC: (800, 10),
 }
 
 # Pre-emptive hop: hop this many ms BEFORE the throttle window expires.
@@ -105,7 +108,8 @@ def classify_loss(loss_pct: float) -> int:
     if loss_pct < 30:   return MODE_NORMAL
     elif loss_pct < 60: return MODE_MODERATE
     elif loss_pct < 80: return MODE_HIGH
-    else:               return MODE_NUCLEAR
+    elif loss_pct < 90: return MODE_NUCLEAR
+    else:               return MODE_ULTRA_NUC
 
 # ─── Packet header (16 bytes) ─────────────────────────────────────────────────
 # magic:2  type:1  transport:1  seq:4

@@ -1063,6 +1063,7 @@ class HopShotClient:
             (common.MODE_MODERATE, 40.0),
             (common.MODE_HIGH, 70.0),
             (common.MODE_NUCLEAR, 95.0),
+            (common.MODE_ULTRA_NUC, 99.0),
         ]
         for stage_mode, stage_loss_hint in stage_plan:
             self._set_mode(stage_loss_hint)
@@ -1093,9 +1094,9 @@ class HopShotClient:
                 scan["udp_port_hopping_bypassed"] = True
                 return recovery_loss, scan
 
-        self._set_mode(95.0)
-        if not scan["mode_progression"] or scan["mode_progression"][-1] != common.MODE_NAMES[common.MODE_NUCLEAR]:
-            scan["mode_progression"].append(common.MODE_NAMES[common.MODE_NUCLEAR])
+        self._set_mode(99.0)
+        if not scan["mode_progression"] or scan["mode_progression"][-1] != common.MODE_NAMES[common.MODE_ULTRA_NUC]:
+            scan["mode_progression"].append(common.MODE_NAMES[common.MODE_ULTRA_NUC])
         return initial_loss, scan
 
     def start(self):
@@ -1232,9 +1233,10 @@ class HopShotClient:
         threading.Thread(target=self._monitor_loop,      daemon=True).start()
         if self.keepalive_interval_sec > 0:
             threading.Thread(target=self._heartbeat_loop, daemon=True).start()
-            if self.verbose:
-                log.debug("[client] startup phase=quic-connect")
-            self._connect_quic()
+        if self.service_mode == "proxy":
+            self._start_proxy_listener()
+        elif self.tunnel_mode != "off" and self._transport_sock is not None:
+            threading.Thread(target=self._tunnel_rx_loop, daemon=True).start()
             threading.Thread(target=self._tunnel_tx_loop, daemon=True).start()
 
         log.info(
@@ -1306,6 +1308,9 @@ class HopShotClient:
         with self._mode_lock:
             self.mode      = common.classify_loss(loss_pct)
             self.hop_ms, self.burst_mult = common.MODE_PARAMS[self.mode]
+            if self.mode == common.MODE_ULTRA_NUC:
+                # Scale ULTRA_NUC burst by severity: 90%=>x10, 100%=>x16.
+                self.burst_mult = max(10, min(16, 10 + int(max(0.0, loss_pct - 90.0) * 0.6)))
             if self.fixed_hop_ms > 0:
                 self.hop_ms = self.fixed_hop_ms
             if self.manual_burst_mult > 0:
@@ -1520,7 +1525,7 @@ class HopShotClient:
             log.debug("[reactive] skipped (high-latency mode)")
         nuclear_force_multi_port = (
             self.nuclear_fail_fanout
-            and mode == common.MODE_NUCLEAR
+            and mode in (common.MODE_NUCLEAR, common.MODE_ULTRA_NUC)
             and should_hop
         )
         if should_hop:

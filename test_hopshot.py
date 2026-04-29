@@ -244,17 +244,18 @@ test("obfs actually changes bytes", t_obfs_changes_data)
 print("\n[ Mode Classification ]")
 
 def t_modes():
-    cases=[(0,0),(29,0),(30,1),(59,1),(60,2),(79,2),(80,3),(100,3)]
+    cases=[(0,0),(29,0),(30,1),(59,1),(60,2),(79,2),(80,3),(89,3),(90,4),(100,4)]
     for loss,exp in cases:
         assert common.classify_loss(loss)==exp, f"loss={loss}"
-test("all thresholds: normal/moderate/high/NUCLEAR", t_modes)
+test("all thresholds: normal/moderate/high/NUCLEAR/ULTRA_NUC", t_modes)
 
 def t_burst_mult():
     assert common.MODE_PARAMS[0][1]==1
     assert common.MODE_PARAMS[1][1]==2
     assert common.MODE_PARAMS[2][1]==4
     assert common.MODE_PARAMS[3][1]==8
-test("burst multipliers 1x/2x/4x/8x correct", t_burst_mult)
+    assert common.MODE_PARAMS[4][1]==10
+test("burst multipliers 1x/2x/4x/8x/10x baseline correct", t_burst_mult)
 
 def t_profile_overrides():
     base = {
@@ -278,7 +279,7 @@ def t_profile_overrides():
     assert expected.issubset(set(PROFILE_PRESETS))
 test("profile presets map to safe operator modes", t_profile_overrides)
 
-def t_startup_auto_scan_ramps_step_by_step_to_nuclear():
+def t_startup_auto_scan_ramps_step_by_step_to_ultra_nuc():
     port = 19310 + random.randint(0, 30)
     c = HopShotClient(base_cfg(port, adaptive_mode=True, jitter_bytes=0, startup_capacity_scan=True))
     
@@ -297,17 +298,17 @@ def t_startup_auto_scan_ramps_step_by_step_to_nuclear():
     
     try:
         loss, scan = c._startup_auto_scan({"loss_pct": 100.0})
-        # All three modes should be tried, ending in NUCLEAR
+        # All stages should be tried, ending in ULTRA_NUC
         modes = scan.get("mode_progression", [])
         assert loss == 100.0, f"loss should be 100, got {loss}"
         assert scan["udp_throttled"] is True, "udp_throttled should be True"
-        assert modes == ["moderate", "high", "NUCLEAR"], f"expected mode progression, got {modes}"
-        assert c.mode == common.MODE_NUCLEAR, f"Expected MODE_NUCLEAR={common.MODE_NUCLEAR}, got {c.mode}"
-        assert c.burst_mult == common.MODE_PARAMS[common.MODE_NUCLEAR][1], f"burst_mult should be 8, got {c.burst_mult}"
+        assert modes == ["moderate", "high", "NUCLEAR", "ULTRA_NUC"], f"expected mode progression, got {modes}"
+        assert c.mode == common.MODE_ULTRA_NUC, f"Expected MODE_ULTRA_NUC={common.MODE_ULTRA_NUC}, got {c.mode}"
+        assert 10 <= c.burst_mult <= 16, f"ULTRA_NUC burst should be x10..x16, got {c.burst_mult}"
     finally:
         clientmod.probe_port = original_probe_port
         c.stop()
-test("startup scan escalates failed presets through nuclear mode", t_startup_auto_scan_ramps_step_by_step_to_nuclear)
+    test("startup scan escalates failed presets through ultra-nuc mode", t_startup_auto_scan_ramps_step_by_step_to_ultra_nuc)
 
 def t_diag_recommend_udp_quic_when_bypass():
     rec = build_network_recommendation(
@@ -686,7 +687,8 @@ test("all hops stay within port_min:port_max", t_hop_in_range)
 print("\n[ Pre-emptive Hopping ]")
 
 def t_preemptive_faster():
-    # Pre-emptive interval (800ms) must be <= mode hop interval (1000ms nuclear)
+    # Pre-emptive interval (800ms) must be <= all mode hop intervals.
+    assert common.PREEMPTIVE_HOP_MS <= 800
     assert common.PREEMPTIVE_HOP_MS <= 1000
     assert common.PREEMPTIVE_HOP_MS <= 1500
     assert common.PREEMPTIVE_HOP_MS <= 3000
@@ -1385,6 +1387,22 @@ def t_adaptive_mode_forces_auto_hop_burst():
     finally:
         c.stop()
 test("adaptive mode keeps loss-based hop/burst automation enabled", t_adaptive_mode_forces_auto_hop_burst)
+
+def t_ultra_nuc_dynamic_burst_scales_10_to_16():
+    c = HopShotClient(base_cfg(19805, adaptive_mode=False))
+    try:
+        c._set_mode(90.0)
+        assert c.mode == common.MODE_ULTRA_NUC
+        assert c.hop_ms == 800
+        assert c.burst_mult == 10
+
+        c._set_mode(100.0)
+        assert c.mode == common.MODE_ULTRA_NUC
+        assert c.hop_ms == 800
+        assert c.burst_mult == 16
+    finally:
+        c.stop()
+test("ULTRA_NUC burst scales from x10 to x16 by loss severity", t_ultra_nuc_dynamic_burst_scales_10_to_16)
 
 def t_nuclear_fallback_forces_multiport_fanout():
     cfg = base_cfg(

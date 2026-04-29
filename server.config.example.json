@@ -17,7 +17,7 @@
   "declared_down_kbps": 0,
   "verbose": false,
   "jitter_bytes": 64,
-  "tunnel_mode": "off",
+  "tunnel_mode": "udp",
   "tunnel_iface": "hopshot0",
   "tunnel_mtu": 1400,
   "tunnel_address": "10.7.0.1/30",

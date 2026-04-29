@@ -115,13 +115,16 @@ class ShardGroup:
 # ─── Session ──────────────────────────────────────────────────────────────────
 
 class Session:
-    def __init__(self, session_id: int, addr, declared_down_kbps: float = 0):
+    def __init__(self, session_id: int, addr, declared_down_kbps: float = 0,
+                 default_obfs: bool = False, default_masq: bool = False):
         self.session_id = session_id
         self.addr       = addr
         self.reply_addr = addr
         self.groups     = {}          # seq → ShardGroup
         self.lock       = threading.Lock()
         self.last_seen  = time.monotonic()
+        self.rx_obfs    = default_obfs
+        self.rx_masq    = default_masq
         self.receiver   = brutal.BrutalReceiver(
             declared_down_kbps=declared_down_kbps
         )
@@ -189,6 +192,9 @@ class HopShotServer:
         self._tunnel_udp_sock = None
         self._proxy_relays = {}
         self._proxy_relays_lock = threading.Lock()
+        self._reply_wrap_seq = 0
+        self._reply_wrap_lock = threading.Lock()
+        self._tunnel_tx_thread_started = False
 
         if self.tunnel_mode in {"tun", "tap"}:
             try:
@@ -225,6 +231,35 @@ class HopShotServer:
                 f"max_ping_ms={self.max_ping_ms} session_timeout={self.session_timeout_sec}s"
             )
 
+    def _ensure_adaptive_tunnel_backend(self, sid: int | None = None):
+        if self._tunnel is not None or self._tunnel_udp_sock is not None:
+            return
+        if not bool(self.cfg.get("adaptive_tunnel_on_demand", True)):
+            return
+
+        bind_text = self.cfg.get("adaptive_tunnel_udp_bind", self.tunnel_udp_bind)
+        target_text = self.cfg.get("adaptive_tunnel_udp_target", self.tunnel_udp_target)
+        bind_addr = _parse_udp_endpoint(bind_text, "127.0.0.1", 19091)
+
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind(bind_addr)
+        sock.settimeout(1.0)
+
+        self._tunnel_udp_sock = sock
+        self._tunnel_udp_target_addr = _parse_udp_endpoint(target_text, "127.0.0.1", 19090) if target_text else None
+        if sid is not None and self._tunnel_session_id is None:
+            self._tunnel_session_id = sid
+
+        if self._running and not self._tunnel_tx_thread_started:
+            threading.Thread(target=self._tunnel_tx_loop, daemon=True).start()
+            self._tunnel_tx_thread_started = True
+
+        bound = self._tunnel_udp_sock.getsockname()
+        log.info(
+            f"[adaptive] enabled on-demand tunnel backend bind={bound[0]}:{bound[1]} "
+            f"target={self._tunnel_udp_target_addr}"
+        )
+
     def _reply_sockets(self, tx_sock: socket.socket | None = None) -> list[socket.socket]:
         sockets: list[socket.socket] = []
         if tx_sock is not None:
@@ -245,6 +280,79 @@ class HopShotServer:
                 if self.verbose:
                     log.debug(f"[{label}] fanout send failed via {sock.getsockname() if hasattr(sock, 'getsockname') else 'sock'}: {e}")
 
+    def _next_reply_wrap_seq(self) -> int:
+        with self._reply_wrap_lock:
+            self._reply_wrap_seq = (self._reply_wrap_seq + 1) & 0xFFFFFFFF
+            return self._reply_wrap_seq
+
+    def _session_style(self, session_id: int | None) -> tuple[bool, bool]:
+        if not session_id:
+            return bool(self.obfs), False
+        with self.sess_lock:
+            sess = self.sessions.get(int(session_id))
+        if sess is None:
+            return bool(self.obfs), False
+        # Client currently has no inbound HTTP3Masq unwrap path for control/data
+        # responses, so keep reply masquerade off for interoperability.
+        return bool(sess.rx_obfs), False
+
+    def _remember_session_style(self, session_id: int, addr, used_obfs: bool, used_masq: bool):
+        if not session_id:
+            return
+        sess = self._get_session(int(session_id), addr)
+        sess.rx_obfs = bool(used_obfs)
+        sess.rx_masq = bool(used_masq)
+
+    def _encode_for_session(self, pkt: bytes, session_id: int | None) -> bytes:
+        use_obfs, use_masq = self._session_style(session_id)
+        out = pkt
+        if use_obfs:
+            out = common.salamander(out, self.seed)
+        if use_masq:
+            out = HTTP3Masq.wrap(out, self.seed, self._next_reply_wrap_seq())
+        return out
+
+    def _decode_udp_packet(self, pkt: bytes):
+        # Try plain, obfs, masq, and masq+obfs permutations so server can
+        # receive client packets regardless of server-side toggle settings.
+        candidates: list[tuple[bytes, bool, bool]] = [(pkt, False, False)]
+
+        obfs_pkt = common.salamander(pkt, self.seed)
+        candidates.append((obfs_pkt, True, False))
+
+        if HTTP3Masq.is_masqueraded(pkt):
+            unwrapped = HTTP3Masq.unwrap(pkt, self.seed)
+            if unwrapped:
+                candidates.append((unwrapped, False, True))
+                candidates.append((common.salamander(unwrapped, self.seed), True, True))
+
+        if HTTP3Masq.is_masqueraded(obfs_pkt):
+            unwrapped = HTTP3Masq.unwrap(obfs_pkt, self.seed)
+            if unwrapped:
+                candidates.append((unwrapped, True, True))
+
+        seen = set()
+        for raw, used_obfs, used_masq in candidates:
+            key = (raw, used_obfs, used_masq)
+            if key in seen:
+                continue
+            seen.add(key)
+            hdr, payload = common.unpack_header(raw)
+            if hdr is not None:
+                return hdr, payload, used_obfs, used_masq
+        return None, None, False, False
+
+    def _decode_quic_packet(self, data: bytes):
+        # QUIC path currently uses plain or obfs payloads.
+        hdr, payload = common.unpack_header(data)
+        if hdr is not None:
+            return hdr, payload, False
+        decoded = common.salamander(data, self.seed)
+        hdr, payload = common.unpack_header(decoded)
+        if hdr is not None:
+            return hdr, payload, True
+        return None, None, False
+
     def _proxy_key(self, session_id: int, stream_id: int) -> tuple[int, int]:
         return session_id, stream_id
 
@@ -256,8 +364,7 @@ class HopShotServer:
             transport=common.TRANSPORT_RAW,
             stream_id=stream_id,
         ) + payload
-        if self.obfs:
-            pkt = common.salamander(pkt, self.seed)
+        pkt = self._encode_for_session(pkt, session_id)
         self._send_reply_fanout(pkt, addr, tx_sock=tx_sock, label="proxy")
 
     def _proxy_close(self, session_id: int, stream_id: int):
@@ -386,6 +493,7 @@ class HopShotServer:
         threading.Thread(target=self._cleanup_loop,  daemon=True).start()
         if self.tunnel_mode != "off":
             threading.Thread(target=self._tunnel_tx_loop, daemon=True).start()
+            self._tunnel_tx_thread_started = True
 
         log.info("Server ready.")
 
@@ -466,27 +574,14 @@ class HopShotServer:
                         log.exception(f"[UDP:{label}] receive loop: {e}")
 
     def _handle_udp(self, pkt: bytes, addr, recv_sock: socket.socket):
-        # ── HTTP/3 masquerade unwrap ──────────────────────────────────────────
-        if self.masquerade and HTTP3Masq.is_masqueraded(pkt):
-            if self.verbose:
-                log.debug(f"[UDP] masquerade candidate {len(pkt)}B from {addr}")
-            unwrapped = HTTP3Masq.unwrap(pkt, self.seed)
-            if unwrapped:
-                pkt = unwrapped
-                if self.verbose:
-                    log.debug(f"[UDP] masquerade unwrap ok -> {len(pkt)}B")
-            elif self.verbose:
-                log.debug("[UDP] masquerade unwrap failed; treating as plain packet")
-            # If unwrap failed, fall through — may be a plain packet
-
-        if self.obfs:
-            pkt = common.salamander(pkt, self.seed)
-
-        hdr, payload = common.unpack_header(pkt)
+        recv_size = len(pkt)
+        hdr, payload, used_obfs, used_masq = self._decode_udp_packet(pkt)
         if hdr is None:
             if self.verbose:
                 log.debug(f"[UDP] dropped undecodable packet {len(pkt)}B from {addr}")
             return
+
+        self._remember_session_style(int(hdr.get("session_id", 0) or 0), addr, used_obfs, used_masq)
 
         t = hdr["type"]
         if self.verbose:
@@ -502,7 +597,7 @@ class HopShotServer:
             self._handle_data(hdr, payload, addr, common.TRANSPORT_RAW, tx_sock=recv_sock)
         elif t == common.TYPE_MTU_PROBE:
             # MTU probe: echo back with the size we actually received
-            self._handle_mtu_probe(hdr, payload, addr, len(pkt), tx_sock=recv_sock)
+            self._handle_mtu_probe(hdr, payload, addr, recv_size, tx_sock=recv_sock)
         elif t == common.TYPE_KEEPALIVE:
             self._handle_keepalive(hdr, addr)
         elif t == common.TYPE_PROXY_OPEN:
@@ -516,16 +611,15 @@ class HopShotServer:
 
     def _on_quic_data(self, session_id, data: bytes):
         """Called by QUICServer for each received TLS record."""
-        if self.obfs:
-            data = common.salamander(data, self.seed)
+        hdr, payload, used_obfs = self._decode_quic_packet(data)
         if self.verbose:
             log.debug(f"[QUIC] rx session={session_id} {len(data)}B")
-
-        hdr, payload = common.unpack_header(data)
         if hdr is None:
             if self.verbose:
                 log.debug(f"[QUIC] undecodable session={session_id} {len(data)}B")
             return
+
+        self._remember_session_style(int(hdr.get("session_id", 0) or 0), None, used_obfs, False)
 
         hdr["transport"] = common.TRANSPORT_QUIC
         t = hdr["type"]
@@ -567,8 +661,7 @@ class HopShotServer:
                 f"client_rx_hint={client_rx_kbps} server_tx_hint={server_tx_hint}"
             )
 
-        if self.obfs:
-            reply = common.salamander(reply, self.seed)
+        reply = self._encode_for_session(reply, int(hdr.get("session_id", 0) or 0))
         try:
             self._send_reply_fanout(reply, addr, tx_sock=tx_sock, label="probe")
         except Exception:
@@ -609,8 +702,7 @@ class HopShotServer:
             transport=transport,
         ) + new_token + server_ts
 
-        if self.obfs:
-            ack = common.salamander(ack, self.seed)
+        ack = self._encode_for_session(ack, sid)
         try:
             self._send_reply_fanout(ack, addr, tx_sock=tx_sock, label="resume")
             log.info(f"[resume] accepted sid={sid} addr={addr}")
@@ -626,6 +718,7 @@ class HopShotServer:
             self._tun_seq = (self._tun_seq + 1) & 0xFFFFFFFF
             seq = self._tun_seq
 
+        sess_obfs, sess_masq = self._session_style(sess.session_id)
         encoded = encode_datagrams(
             payload=payload,
             seq=seq,
@@ -634,8 +727,8 @@ class HopShotServer:
             fec_k=self.fec_k,
             fec_m=self.fec_m,
             jitter=self.jitter,
-            obfs=self.obfs,
-            masquerade=self.masquerade,
+            obfs=sess_obfs,
+            masquerade=sess_masq,
             transport=common.TRANSPORT_RAW,
             max_datagram_size=max(64, int(self.tunnel_mtu or common.MAX_PACKET)),
             stream_id=stream_id_from_ip_packet(payload),
@@ -690,8 +783,7 @@ class HopShotServer:
         reply = reply_hdr + _struct.pack("!H", recv_size)
         if self.verbose:
             log.debug(f"[MTU] reply seq={hdr['seq']} size={recv_size} addr={addr}")
-        if self.obfs:
-            reply = common.salamander(reply, self.seed)
+        reply = self._encode_for_session(reply, int(hdr.get("session_id", 0) or 0))
         try:
             self._send_reply_fanout(reply, addr, tx_sock=tx_sock, label="mtu")
         except Exception:
@@ -779,6 +871,13 @@ class HopShotServer:
         so they can be processed by local applications. Otherwise, print for testing.
         """
         tx_sock = tx_sock or self.udp_sock
+
+        if self._tunnel is None and self._tunnel_udp_sock is None:
+            try:
+                self._ensure_adaptive_tunnel_backend(sid)
+            except Exception as e:
+                if self.verbose:
+                    log.exception(f"[adaptive] tunnel backend init failed sid={sid}: {e}")
         
         # Write reconstructed payload to tunnel backend
         if self._tunnel is not None:
@@ -819,8 +918,7 @@ class HopShotServer:
                 transport  = transport,
             )
             pkt = reply_hdr + bw_payload
-            if self.obfs:
-                pkt = common.salamander(pkt, self.seed)
+            pkt = self._encode_for_session(pkt, sid)
             try:
                 self._send_reply_fanout(pkt, feedback_addr, tx_sock=tx_sock, label="feedback")
             except Exception:
@@ -858,8 +956,7 @@ class HopShotServer:
                     session_id = sess.session_id,
                 )
                 pkt = reply_hdr + bw_payload
-                if self.obfs:
-                    pkt = common.salamander(pkt, self.seed)
+                pkt = self._encode_for_session(pkt, sess.session_id)
                 try:
                     self.udp_sock.sendto(pkt, target_addr)
                 except Exception:
@@ -872,7 +969,9 @@ class HopShotServer:
         with self.sess_lock:
             if sid not in self.sessions:
                 self.sessions[sid] = Session(
-                    sid, addr, self.declared_down_kbps
+                    sid, addr, self.declared_down_kbps,
+                    default_obfs=bool(self.obfs),
+                    default_masq=bool(self.masquerade),
                 )
                 if self.verbose:
                     log.debug(f"[session] created sid={sid} addr={addr}")
@@ -985,6 +1084,7 @@ class HopShotServer:
                 self._tunnel_udp_sock.close()
             except Exception:
                 pass
+        self._tunnel_tx_thread_started = False
         if self.cfg.get("setup_iptables", False):
             self._remove_iptables()
         if self.verbose:

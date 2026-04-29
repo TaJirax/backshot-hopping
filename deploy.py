@@ -36,7 +36,7 @@ SERVER_DEFAULT_CONFIG = {
     "declared_down_kbps": 0,
     "verbose": False,
     "jitter_bytes": 64,
-    "tunnel_mode": "off",
+    "tunnel_mode": "udp",
     "tunnel_iface": "hopshot0",
     "tunnel_mtu": 1400,
     "tunnel_address": "10.7.0.1/30",
@@ -68,7 +68,7 @@ CLIENT_DEFAULT_CONFIG = {
     "preemptive_hop_ms": 800,
     "fixed_hop_ms": 0,
     "keepalive_interval_sec": 15,
-    "tunnel_mode": "off",
+    "tunnel_mode": "udp",
     "tunnel_iface": "hopshot0",
     "tunnel_mtu": 1400,
     "tunnel_address": "10.7.0.2/30",
@@ -213,6 +213,43 @@ def ensure_server_config_ready(config_path: Path, auto_seed: bool = False) -> tu
             except json.JSONDecodeError:
                 notes.append("Skipped client.config.json seed sync because that file is not valid JSON.")
 
+    if str(cfg.get("tunnel_mode", "off") or "off").strip().lower() == "off":
+        cfg["tunnel_mode"] = "udp"
+        notes.append("Enabled tunnel_mode=udp for out-of-box VPN relay behavior.")
+
+    write_config(config_path, cfg)
+    return cfg, notes
+
+
+def ensure_client_config_ready(config_path: Path, server_ip: str | None = None) -> tuple[dict, list[str]]:
+    cfg = default_config("client")
+    cfg.update(load_config(config_path))
+    notes: list[str] = []
+
+    if str(cfg.get("tunnel_mode", "off") or "off").strip().lower() == "off":
+        cfg["tunnel_mode"] = "udp"
+        notes.append("Enabled tunnel_mode=udp for out-of-box VPN relay behavior.")
+
+    # If client seed is placeholder, try to inherit from server config.
+    if _is_placeholder_seed(str(cfg.get("shared_seed", ""))):
+        server_path = ROOT / "server.config.json"
+        if server_path.exists():
+            try:
+                server_cfg = load_config(server_path)
+                server_seed = str(server_cfg.get("shared_seed", "") or "")
+                if not _is_placeholder_seed(server_seed):
+                    cfg["shared_seed"] = server_seed
+                    notes.append("Inherited shared_seed from server.config.json.")
+            except json.JSONDecodeError:
+                notes.append("Skipped server seed inherit because server.config.json is not valid JSON.")
+
+    # Accept explicit server IP/host for easier first-run remote setup.
+    if server_ip:
+        server_ip = server_ip.strip()
+        if server_ip:
+            cfg["destinations"] = [server_ip]
+            notes.append(f"Set client destination to {server_ip}.")
+
     write_config(config_path, cfg)
     return cfg, notes
 
@@ -223,6 +260,7 @@ def main() -> int:
     parser.add_argument("--config", default=None, help="Config file to create/use for the selected role")
     parser.add_argument("--prepare-only", action="store_true", help="Install and create config, but do not launch")
     parser.add_argument("--easy", action="store_true", help="Server-only: normalize config and auto-generate shared_seed if still placeholder")
+    parser.add_argument("--server-ip", default=None, help="Client-only: set primary destination IP/host in config")
     parser.add_argument("--diagnose", action="store_true", help="Run target script with --diagnose after prepare steps")
     args, extra = parser.parse_known_args()
 
@@ -257,6 +295,16 @@ def main() -> int:
                 print(f"- {note}")
         if args.prepare_only:
             print("Next step: python deploy.py server --config server.config.json")
+
+    if args.role == "client":
+        cfg, notes = ensure_client_config_ready(config_path, server_ip=args.server_ip)
+        if notes:
+            print("Client config normalized.")
+            print(f"Config: {config_path}")
+            for note in notes:
+                print(f"- {note}")
+        if args.prepare_only and args.server_ip:
+            print(f"Next step: python deploy.py client --config {config_path.name}")
 
     if args.prepare_only:
         print(f"Prepared {args.role} environment.")
