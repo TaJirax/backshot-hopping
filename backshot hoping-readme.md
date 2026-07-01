@@ -29,3 +29,4 @@ python server.py --port 10000 --seed "my-secret"
 - Proxy mode is app/browser proxy only.
 - `tun` / `tap` with `--tunnel-default-route` is the whole-PC VPN path.
 - `udp` tunnel mode is relay-only.
+test
