@@ -195,7 +195,7 @@ python deploy.py server --easy
 ```text
 127.0.0.1:1080
 ```
-
+test
 ### نکته مهم
 
 اگر `tunnel_mode=udp` باشد، فقط relay محلی فعال است و کل سیستم را تونل نمی‌کند.
